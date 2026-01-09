@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime
 from collections import defaultdict
 import logging
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import (
@@ -70,7 +71,7 @@ def summarize_alerts(alerts: list[str]) -> str:
         mood = "⚠️ Market is Sideways or Mixed"
 
     # Format the final summary message
-    now_formatted = datetime.now().strftime('%I:%M %p %d-%b-%Y')
+    now_formatted = datetime.now(ZoneInfo("Asia/Kolkata")).strftime('%I:%M %p %d-%b-%Y')
     summary_header = f"**BNF 1-Minute Market Pulse**\n_{now_formatted}_\n\n"
     summary_body = (
         f"**Analysis:**\n"
