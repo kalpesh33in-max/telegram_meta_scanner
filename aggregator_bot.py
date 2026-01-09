@@ -70,7 +70,8 @@ def summarize_alerts(alerts: list[str]) -> str:
         mood = "⚠️ Market is Sideways or Mixed"
 
     # Format the final summary message
-    summary_header = f"**BNF 1-Minute Market Pulse**\n_{datetime.now().strftime('%I:%M %p %d-%b-%Y')}_
+    now_formatted = datetime.now().strftime('%I:%M %p %d-%b-%Y')
+    summary_header = f"**BNF 1-Minute Market Pulse**\n_{now_formatted}_\n\n"
 
 "
     summary_body = (
