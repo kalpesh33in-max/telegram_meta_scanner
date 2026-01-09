@@ -72,8 +72,6 @@ def summarize_alerts(alerts: list[str]) -> str:
     # Format the final summary message
     now_formatted = datetime.now().strftime('%I:%M %p %d-%b-%Y')
     summary_header = f"**BNF 1-Minute Market Pulse**\n_{now_formatted}_\n\n"
-
-"
     summary_body = (
         f"**Analysis:**\n"
         f" • Total Signals: {total_alerts}\n"
