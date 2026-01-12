@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime
 from collections import defaultdict
 import logging
+import re
 from zoneinfo import ZoneInfo
 
 from telegram import Update
@@ -46,47 +47,112 @@ BUFFER_LOCK = asyncio.Lock()
 # (Inspired by lalo.py)
 # =========================
 def summarize_alerts(alerts: list[str]) -> str:
-    """Parses a list of alert messages and creates a single summary message."""
+    """
+    Parses a list of detailed alert messages, creates a structured summary for
+    each symbol, and adds a trading signal (BUY CALL/BUY PUT).
+    """
     if not alerts:
-        return "" # Return empty string if there's nothing to report
+        return ""
 
-    total_alerts = len(alerts)
-    bullish_signals = 0
-    bearish_signals = 0
-    
-    # Keyword-based analysis
+    aggregated_data = defaultdict(lambda: {
+        "actions": defaultdict(lambda: {'CE': 0, 'PE': 0}),
+        "future_prices": []
+    })
+
+    patterns = {
+        "symbol": re.compile(r"^(.*?)\s*\|"),
+        "action": re.compile(r"ACTION: ([\w\(\)]+)"),
+        "lots": re.compile(r"\((\d+) lots\)"),
+        "option_type": re.compile(r"STRIKE: \d+(CE|PE)"),
+        "future_price": re.compile(r"FUTURE PRICE: ([\d\.]+)")
+    }
+
     for alert in alerts:
-        # Simple check for keywords indicating bullish or bearish sentiment
-        if "PRICE: ↑" in alert or "LONG" in alert or "BUYING" in alert:
-            bullish_signals += 1
-        elif "PRICE: ↓" in alert or "SHORT" in alert or "WRITING" in alert or "UNWINDING" in alert:
-            bearish_signals += 1
+        try:
+            symbol_match = patterns["symbol"].search(alert)
+            action_match = patterns["action"].search(alert)
+            lots_match = patterns["lots"].search(alert)
+            option_type_match = patterns["option_type"].search(alert)
+            future_price_match = patterns["future_price"].search(alert)
 
-    # Determine overall market mood
-    if bullish_signals > bearish_signals:
-        mood = "📈 Trend is Bullish"
-    elif bearish_signals > bullish_signals:
-        mood = "📉 Trend is Bearish"
-    else:
-        mood = "⚠️ Market is Sideways or Mixed"
+            if all([symbol_match, action_match, lots_match, option_type_match, future_price_match]):
+                symbol = symbol_match.group(1).strip()
+                if symbol == "ICICI": symbol = "ICICIBANK"
+                action = action_match.group(1)
+                lots = int(lots_match.group(1))
+                option_type = option_type_match.group(2)
+                future_price = float(future_price_match.group(1))
 
-    # Format the final summary message
-    now_formatted = datetime.now(ZoneInfo("Asia/Kolkata")).strftime('%I:%M %p %d-%b-%Y')
-    summary_header = f"**BNF 1-Minute Market Pulse**\n_{now_formatted}_\n\n"
-    summary_body = (
-        f"**Analysis:**\n"
-        f" • Total Signals: {total_alerts}\n"
-        f" • Bullish Signals: {bullish_signals}\n"
-        f" • Bearish Signals: {bearish_signals}\n\n"
-        f"**Conclusion:** {mood}"
-    )
+                data = aggregated_data[symbol]
+                data["actions"][action][option_type] += lots
+                data["future_prices"].append(future_price)
+        except (AttributeError, ValueError, IndexError) as e:
+            logger.warning(f"Could not parse alert: '{alert}'. Error: {e}")
+            continue
     
-    # You can also include the raw alerts if you want, but it might get long.
-    # To include them, you could uncomment the following lines:
-    # raw_alerts_str = "\n\n---".join(alerts)
-    # return f"{summary_header}{summary_body}\n\n--- Raw Alerts ---\n{raw_alerts_str}"
-    
-    return f"{summary_header}{summary_body}"
+    final_summary_parts = []
+    sorted_symbols = sorted(aggregated_data.keys())
+
+    for symbol in sorted_symbols:
+        data = aggregated_data[symbol]
+        actions = data["actions"]
+        prices = data["future_prices"]
+
+        if not actions or not prices:
+            continue
+
+        # --- Signal Calculation ---
+        bullish_power = (actions["BUYER(LONG)"]["CE"] + actions["BUYER(LONG)"]["PE"] +
+                         actions["REMOVE FROM SHORT"]["CE"] + actions["REMOVE FROM SHORT"]["PE"] +
+                         actions["HEDGING"]["PE"] + # Writing Puts is bullish
+                         actions["REMOVE FROM HEDGE"]["CE"]) # Closing Call writes is bullish
+
+        bearish_power = (actions["WRITER(SHORT)"]["CE"] + actions["WRITER(SHORT)"]["PE"] +
+                         actions["REMOVE FROM LONG"]["CE"] + actions["REMOVE FROM LONG"]["PE"] +
+                         actions["HEDGING"]["CE"] + # Writing Calls is bearish
+                         actions["REMOVE FROM HEDGE"]["PE"]) # Closing Put writes is bearish
+        
+        first_price = prices[0]
+        last_price = prices[-1]
+        price_arrow = "↔"
+        if last_price > first_price: price_arrow = "↑"
+        elif last_price < first_price: price_arrow = "↓"
+
+        signal = "SIDEWAYS ↔️"
+        if bullish_power > bearish_power * 1.2 and price_arrow != "↓":
+            signal = "BUY CALL 📈"
+        elif bearish_power > bullish_power * 1.2 and price_arrow != "↑":
+            signal = "BUY PUT 📉"
+
+        # --- Formatting ---
+        header = f"**SYMBOL: {symbol}**\n"
+        price_line = f"**FUTURE PRICE: {last_price:.2f} {price_arrow}**\n"
+        signal_line = f"**SIGNAL: {signal}**\n\n"
+        
+        table_header = "| ACTION            | CE LOTS | PE LOTS |\n"
+        table_separator = "|-------------------|---------|---------|\n"
+        table_rows = []
+        
+        action_order = [
+            "HEDGING", "REMOVE FROM HEDGE", "BUYER(LONG)", 
+            "WRITER(SHORT)", "REMOVE FROM SHORT", "REMOVE FROM LONG"
+        ]
+        
+        for action in action_order:
+            if action in actions:
+                ce_lots = actions[action].get('CE', 0)
+                pe_lots = actions[action].get('PE', 0)
+                if ce_lots > 0 or pe_lots > 0:
+                    table_rows.append(f"| {action:<17} | {ce_lots:<7} | {pe_lots:<7} |\n")
+
+        if table_rows:
+            symbol_summary = header + price_line + signal_line + table_header + table_separator + "".join(table_rows)
+            final_summary_parts.append(symbol_summary)
+
+    if not final_summary_parts:
+        return "No actionable alerts detected in the last interval."
+        
+    return "\n---\n".join(final_summary_parts)
 
 # =========================
 # TELEGRAM BOT HANDLERS
