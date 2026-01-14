@@ -253,7 +253,6 @@ def main():
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .drop_pending_updates(True)
         .post_init(post_start)
         .build()
     )
@@ -268,7 +267,7 @@ def main():
     ))
 
     # Start polling
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
