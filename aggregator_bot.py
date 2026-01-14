@@ -48,44 +48,62 @@ BUFFER_LOCK = asyncio.Lock()
 # =========================
 def summarize_alerts(alerts: list[str]) -> str:
     """
-    Parses a list of detailed alert messages, creates a structured summary for
-    each symbol, and adds a trading signal (BUY CALL/BUY PUT).
+    Parses a list of detailed, multi-line alert messages from gfdl_scanner.py,
+    creates a structured summary for each symbol in a table format, inspired by lalo.pdf.
     """
     if not alerts:
         return ""
 
     aggregated_data = defaultdict(lambda: {
         "actions": defaultdict(lambda: {'CE': 0, 'PE': 0}),
-        "future_prices": []
+        "future_prices": [],
+        "last_price_change": "↔"  # Default to sideways
     })
 
     patterns = {
-        "symbol": re.compile(r"^(.*?)\s*\|"),
+        "symbol": re.compile(r"^([\w\s]+)\s*\|"),
         "action": re.compile(r"ACTION: ([\w\(\)]+)"),
         "lots": re.compile(r"\((\d+) lots\)"),
         "option_type": re.compile(r"STRIKE: \d+(CE|PE)"),
-        "future_price": re.compile(r"FUTURE PRICE: ([\d\.]+)")
+        "future_price": re.compile(r"FUTURE PRICE: ([\d\.]+)"),
+        "price_change": re.compile(r"PRICE: (↑|↓|↔)")
     }
 
     for alert in alerts:
         try:
-            symbol_match = patterns["symbol"].search(alert)
-            action_match = patterns["action"].search(alert)
-            lots_match = patterns["lots"].search(alert)
-            option_type_match = patterns["option_type"].search(alert)
-            future_price_match = patterns["future_price"].search(alert)
+            # Split alert into lines for easier parsing
+            lines = alert.strip().split('\n')
+            
+            # Extract data from the multi-line format
+            symbol_match = patterns["symbol"].search(lines[0])
+            
+            # Find the relevant lines for other fields
+            action_line = next((line for line in lines if "ACTION:" in line), None)
+            lots_line = next((line for line in lines if "lots" in line), None)
+            option_type_line = next((line for line in lines if "STRIKE:" in line), None)
+            future_price_line = next((line for line in lines if "FUTURE PRICE:" in line), None)
+            price_change_line = next((line for line in lines if "PRICE:" in line), None)
+            
+            action_match = patterns["action"].search(action_line) if action_line else None
+            lots_match = patterns["lots"].search(lots_line) if lots_line else None
+            option_type_match = patterns["option_type"].search(option_type_line) if option_type_line else None
+            future_price_match = patterns["future_price"].search(future_price_line) if future_price_line else None
+            price_change_match = patterns["price_change"].search(price_change_line) if price_change_line else None
 
-            if all([symbol_match, action_match, lots_match, option_type_match, future_price_match]):
+            if all([symbol_match, action_match, lots_match, option_type_match, future_price_match, price_change_match]):
                 symbol = symbol_match.group(1).strip()
-                if symbol == "ICICI": symbol = "ICICIBANK"
+                if symbol == "ICICI": symbol = "ICICIBANK" # Normalize symbol
                 action = action_match.group(1)
                 lots = int(lots_match.group(1))
                 option_type = option_type_match.group(2)
                 future_price = float(future_price_match.group(1))
+                price_change_indicator = price_change_match.group(1)
 
                 data = aggregated_data[symbol]
                 data["actions"][action][option_type] += lots
                 data["future_prices"].append(future_price)
+                data["last_price_change"] = price_change_indicator
+
         except (AttributeError, ValueError, IndexError) as e:
             logger.warning(f"Could not parse alert: '{alert}'. Error: {e}")
             continue
@@ -100,38 +118,20 @@ def summarize_alerts(alerts: list[str]) -> str:
 
         if not actions or not prices:
             continue
-
-        # --- Signal Calculation ---
-        bullish_power = (actions["BUYER(LONG)"]["CE"] + actions["BUYER(LONG)"]["PE"] +
-                         actions["REMOVE FROM SHORT"]["CE"] + actions["REMOVE FROM SHORT"]["PE"] +
-                         actions["HEDGING"]["PE"] + # Writing Puts is bullish
-                         actions["REMOVE FROM HEDGE"]["CE"]) # Closing Call writes is bullish
-
-        bearish_power = (actions["WRITER(SHORT)"]["CE"] + actions["WRITER(SHORT)"]["PE"] +
-                         actions["REMOVE FROM LONG"]["CE"] + actions["REMOVE FROM LONG"]["PE"] +
-                         actions["HEDGING"]["CE"] + # Writing Calls is bearish
-                         actions["REMOVE FROM HEDGE"]["PE"]) # Closing Put writes is bearish
         
-        first_price = prices[0]
         last_price = prices[-1]
-        price_arrow = "↔"
-        if last_price > first_price: price_arrow = "↑"
-        elif last_price < first_price: price_arrow = "↓"
+        price_arrow = data["last_price_change"]
 
-        signal = "SIDEWAYS ↔️"
-        if bullish_power > bearish_power * 1.2 and price_arrow != "↓":
-            signal = "BUY CALL 📈"
-        elif bearish_power > bullish_power * 1.2 and price_arrow != "↑":
-            signal = "BUY PUT 📉"
-
-        # --- Formatting ---
-        header = f"**SYMBOL: {symbol}**\n"
-        price_line = f"**FUTURE PRICE: {last_price:.2f} {price_arrow}**\n"
-        signal_line = f"**SIGNAL: {signal}**\n\n"
+        # --- Formatting inspired by lalo.pdf ---
+        # Header
+        header_line1 = f"SYMBOL: {symbol}"
+        header_line2 = f"FUTURE PRICE: {last_price:.2f} {price_arrow}"
         
-        table_header = "| ACTION            | CE LOTS | PE LOTS |\n"
-        table_separator = "|-------------------|---------|---------|\n"
-        table_rows = []
+        # Table lines
+        table_lines = [
+            f"{'ACTION':<18} {'CE LOTS':<10} {'PE LOTS':<10}",
+            f"{'-'*18:<18} {'-'*10:<10} {'-'*10:<10}"
+        ]
         
         action_order = [
             "HEDGING", "REMOVE FROM HEDGE", "BUYER(LONG)", 
@@ -143,11 +143,13 @@ def summarize_alerts(alerts: list[str]) -> str:
                 ce_lots = actions[action].get('CE', 0)
                 pe_lots = actions[action].get('PE', 0)
                 if ce_lots > 0 or pe_lots > 0:
-                    table_rows.append(f"| {action:<17} | {ce_lots:<7} | {pe_lots:<7} |\n")
+                    table_lines.append(f"{action:<18} {ce_lots:<10} {pe_lots:<10}")
 
-        if table_rows:
-            symbol_summary = header + price_line + signal_line + table_header + table_separator + "".join(table_rows)
-            final_summary_parts.append(symbol_summary)
+        # Only create a summary if there are actions to show
+        if len(table_lines) > 2:
+            symbol_summary = f"{header_line1}\n{header_line2}\n" + "\n".join(table_lines)
+            # Wrap in Markdown code block for monospaced font
+            final_summary_parts.append(f"```\n{symbol_summary}\n```")
 
     if not final_summary_parts:
         return "No actionable alerts detected in the last interval."
@@ -191,7 +193,7 @@ async def aggregation_task(app: Application):
                     await app.bot.send_message(
                         chat_id=TARGET_CHAT_ID,
                         text=summary_message,
-                        parse_mode="Markdown"
+                        parse_mode="MarkdownV2"
                     )
                     logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
                 except TelegramError as e:
