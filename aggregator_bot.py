@@ -253,6 +253,7 @@ def main():
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
+        .drop_pending_updates(True)
         .post_init(post_start)
         .build()
     )
