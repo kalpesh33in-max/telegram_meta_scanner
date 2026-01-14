@@ -191,6 +191,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         logger.debug("Channel post has no text. Ignoring.")
 
+async def all_updates_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A catch-all handler to log every update to diagnose filtering issues."""
+    logger.critical("!!!!!! CATCH-ALL HANDLER TRIGGERED !!!!!!")
+    logger.critical(f"RAW UPDATE: {update}")
+
+
 async def aggregation_task(app: Application):
     """The background task that runs every X seconds to process the buffer."""
     logger.info("Aggregation task started. Will process buffer every %d seconds.", AGGREGATION_INTERVAL_SECONDS)
@@ -250,6 +256,9 @@ def main():
         .post_init(post_start)
         .build()
     )
+
+    # Add a catch-all handler to see all updates for debugging
+    app.add_handler(MessageHandler(filters.ALL, all_updates_handler), group=-1)
 
     # Add the handler for channel messages
     app.add_handler(MessageHandler(
