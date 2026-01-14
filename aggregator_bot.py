@@ -171,15 +171,25 @@ def summarize_alerts(alerts: list[str]) -> str:
 # =========================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles incoming messages and adds them to the buffer if they are from the source chat."""
-    # We only care about channel posts from the specific source channel
-    if not update.channel_post or update.channel_post.chat_id != SOURCE_CHAT_ID:
+    logger.debug(f"Received an update: {update}")
+
+    if not update.channel_post:
+        logger.debug(f"Update is not a channel post. Ignoring. Update type: {update.effective_message.chat.type if update.effective_message else 'N/A'}")
+        return
+
+    logger.debug(f"Channel Post detected. Chat ID: {update.channel_post.chat_id}, Source Chat ID configured: {SOURCE_CHAT_ID}")
+    
+    if update.channel_post.chat_id != SOURCE_CHAT_ID:
+        logger.debug(f"Channel post chat ID {update.channel_post.chat_id} does not match SOURCE_CHAT_ID {SOURCE_CHAT_ID}. Ignoring.")
         return
 
     message_text = update.channel_post.text
     if message_text:
         async with BUFFER_LOCK:
             MESSAGE_BUFFER.append(message_text)
-        logger.info(f"Buffered 1 message from {SOURCE_CHAT_ID}")
+        logger.info(f"Buffered 1 message from {SOURCE_CHAT_ID}. Message text snippet: {message_text[:50]}...")
+    else:
+        logger.debug("Channel post has no text. Ignoring.")
 
 async def aggregation_task(app: Application):
     """The background task that runs every X seconds to process the buffer."""
