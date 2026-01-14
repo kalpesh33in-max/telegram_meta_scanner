@@ -20,7 +20,7 @@ from telegram.error import TelegramError
 # LOGGING SETUP
 # =========================
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ def summarize_alerts(alerts: list[str]) -> str:
     Parses a list of detailed, multi-line alert messages from gfdl_scanner.py,
     creates a structured summary for each symbol in a table format, inspired by lalo.pdf.
     """
+    logger.info(f"Summarizer received {len(alerts)} alerts to process.")
     if not alerts:
         return ""
 
@@ -70,6 +71,7 @@ def summarize_alerts(alerts: list[str]) -> str:
     }
 
     for alert in alerts:
+        logger.debug(f"Processing alert:\n---\n{alert}\n---")
         try:
             # Split alert into lines for easier parsing
             lines = alert.strip().split('\n')
@@ -103,9 +105,14 @@ def summarize_alerts(alerts: list[str]) -> str:
                 data["actions"][action][option_type] += lots
                 data["future_prices"].append(future_price)
                 data["last_price_change"] = price_change_indicator
+                logger.info(f"Successfully parsed alert for {symbol}.")
+
+            else:
+                logger.warning(f"Failed to parse alert. Some fields were missing. Alert:\n---\n{alert}\n---")
+
 
         except (AttributeError, ValueError, IndexError) as e:
-            logger.warning(f"Could not parse alert: '{alert}'. Error: {e}")
+            logger.error(f"Critical parsing error for alert. Error: {e}. Alert text:\n---\n{alert}\n---")
             continue
     
     final_summary_parts = []
@@ -152,8 +159,11 @@ def summarize_alerts(alerts: list[str]) -> str:
             final_summary_parts.append(f"```\n{symbol_summary}\n```")
 
     if not final_summary_parts:
+        # Also log this event for better debugging
+        logger.info("No actionable alerts were found after processing the buffer. Sending standard message.")
         return "No actionable alerts detected in the last interval."
         
+    logger.info(f"Successfully generated summary for {len(final_summary_parts)} symbols.")
     return "\n---\n".join(final_summary_parts)
 
 # =========================
