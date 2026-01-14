@@ -155,16 +155,25 @@ def summarize_alerts(alerts: list[str]) -> str:
         # Only create a summary if there are actions to show
         if len(table_lines) > 2:
             symbol_summary = f"{header_line1}\n{header_line2}\n" + "\n".join(table_lines)
-            # Wrap in Markdown code block for monospaced font
-            final_summary_parts.append(f"```\n{symbol_summary}\n```")
+            final_summary_parts.append(symbol_summary)
 
     if not final_summary_parts:
         # Also log this event for better debugging
         logger.info("No actionable alerts were found after processing the buffer. Sending standard message.")
         return "No actionable alerts detected in the last interval."
-        
+
+    # --- New: Create a single, clean report with a timestamp ---
+    current_time = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
+    report_header = f"📊 Aggregated Market Report at {current_time}\n"
+    
+    # Join each symbol's summary with a clear separator
+    report_body = "\n\n- - - - - - - - - - - - - - - -\n\n".join(final_summary_parts)
+    
+    # Wrap the entire report in a single code block
+    final_message = f"{report_header}\n```\n{report_body}\n```"
+    
     logger.info(f"Successfully generated summary for {len(final_summary_parts)} symbols.")
-    return "\n---\n".join(final_summary_parts)
+    return final_message
 
 # =========================
 # TELEGRAM BOT HANDLERS
@@ -219,7 +228,7 @@ async def aggregation_task(app: Application):
                     await app.bot.send_message(
                         chat_id=TARGET_CHAT_ID,
                         text=summary_message,
-                        parse_mode="MarkdownV2"
+                        parse_mode="Markdown"
                     )
                     logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
                 except TelegramError as e:
