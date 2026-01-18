@@ -88,7 +88,7 @@ def summarize_alerts(alerts: list[str]) -> str:
                 price_change_indicator = price_change_match.group(1)
 
                 data = aggregated_data[symbol]
-                data["actions"Пожалуйста, предоставьте мне текст, который вы хотите, чтобы я проанализировал. Я готов исправить любые проблемы с экранированием, которые вы найдете.][action][option_type] += lots
+                data["actions"][action][option_type] += lots
                 data["future_prices"].append(future_price)
                 data["last_price_change"] = price_change_indicator
             else:
