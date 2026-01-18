@@ -54,7 +54,7 @@ def summarize_alerts(alerts: list[str]) -> str:
     })
 
     patterns = {
-        "symbol": re.compile(r"^([\w\s]+?)\s*|?s*OPTION"),
+        "symbol": re.compile(r"^([\w\s]+?)\s*\|?\s*OPTION"),
         "action": re.compile(r"ACTION: ([\w\(\)]+)"),
         "lots": re.compile(r"\((\d+) lots\)"),
         "option_type": re.compile(r"STRIKE: \d+(CE|PE)"),
@@ -88,13 +88,13 @@ def summarize_alerts(alerts: list[str]) -> str:
                 price_change_indicator = price_change_match.group(1)
 
                 data = aggregated_data[symbol]
-                data["actions"][action][option_type] += lots
+                data["actions"Пожалуйста, предоставьте мне текст, который вы хотите, чтобы я проанализировал. Я готов исправить любые проблемы с экранированием, которые вы найдете.][action][option_type] += lots
                 data["future_prices"].append(future_price)
                 data["last_price_change"] = price_change_indicator
             else:
                 logger.warning(f"Failed to parse alert. Some fields were missing in: {alert[:50]}...")
         except Exception as e:
-            logger.error(f"Critical parsing error for alert. Error: {e}. Alert text: {alert[:50]}...")
+            logger.critical(f"Critical parsing error for alert. Error: {e}. Alert text: {alert[:50]}...")
             continue
     
     final_summary_parts = []
@@ -135,20 +135,9 @@ def summarize_alerts(alerts: list[str]) -> str:
 # TELEGRAM BOT HANDLERS
 # =========================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    This handler now catches ALL messages and filters manually.
-    This is more robust than relying on library filters.
-    """
-    # Check if the update is a channel post. If not, ignore.
-    if not update.channel_post:
-        return
-
-    # Check if the channel post is from our specific source channel. If not, ignore.
-    if update.channel_post.chat.id != SOURCE_CHAT_ID:
-        logger.info(f"Ignoring message from other channel: {update.channel_post.chat.id}")
+    if not update.channel_post or update.channel_post.chat.id != SOURCE_CHAT_ID:
         return
     
-    # If we get here, it's a message from our source channel. Process it.
     message_text = update.channel_post.text
     if message_text:
         async with BUFFER_LOCK:
@@ -157,29 +146,34 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def aggregation_task(app: Application):
     while True:
-        await asyncio.sleep(AGGREGATION_INTERVAL_SECONDS)
-        
-        alerts_to_process = []
-        async with BUFFER_LOCK:
-            if MESSAGE_BUFFER:
-                alerts_to_process.extend(MESSAGE_BUFFER)
-                MESSAGE_BUFFER.clear()
+        try:
+            await asyncio.sleep(AGGREGATION_INTERVAL_SECONDS)
+            
+            alerts_to_process = []
+            async with BUFFER_LOCK:
+                if MESSAGE_BUFFER:
+                    alerts_to_process.extend(MESSAGE_BUFFER)
+                    MESSAGE_BUFFER.clear()
 
-        if alerts_to_process:
-            logger.info(f"Processing {len(alerts_to_process)} alerts from buffer.")
-            summary_message = summarize_alerts(alerts_to_process)
-            try:
-                await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=summary_message, parse_mode="Markdown")
-                logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
-            except TelegramError as e:
-                logger.error(f"Failed to send message to {TARGET_CHAT_ID}: {e}")
-        else:
-            logger.info("Buffer is empty. Nothing to send.")
+            if alerts_to_process:
+                logger.info(f"Processing {len(alerts_to_process)} alerts from buffer.")
+                summary_message = summarize_alerts(alerts_to_process)
+                try:
+                    await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=summary_message, parse_mode="Markdown")
+                    logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
+                except TelegramError as e:
+                    logger.critical(f"Failed to send summary message: {e}")
+            else:
+                logger.info("Buffer is empty. Nothing to send.")
+        except Exception as e:
+            # This is the new robust error handling for the background task
+            logger.critical(f"!!!!!! UNEXPECTED ERROR IN AGGREGATION TASK: {e} !!!!!!", exc_info=True)
+
 
 async def post_start(app: Application):
     asyncio.create_task(aggregation_task(app))
     try:
-        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v2) is LIVE.")
+        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v3) is LIVE.")
     except TelegramError as e:
         logger.warning(f"Could not send startup message: {e}")
 
@@ -187,10 +181,9 @@ async def post_start(app: Application):
 # MAIN
 # =========================
 def main():
-    logger.info("🚀 Starting Final Aggregator Bot (v2)...")
+    logger.info("🚀 Starting Final Aggregator Bot (v3)...")
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
     
-    # Use a universal handler to catch all messages and filter manually inside the function.
     app.add_handler(MessageHandler(filters.ALL, message_handler))
     
     app.run_polling()
