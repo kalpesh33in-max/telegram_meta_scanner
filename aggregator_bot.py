@@ -73,13 +73,8 @@ def summarize_alerts(alerts: list[str]) -> str:
     for alert in alerts:
         logger.debug(f"Processing alert:\n---\n{alert}\n---")
         try:
-            # Split alert into lines for easier parsing
             lines = alert.strip().split('\n')
-            
-            # Extract data from the multi-line format
             symbol_match = patterns["symbol"].search(lines[0])
-            
-            # Find the relevant lines for other fields
             action_line = next((line for line in lines if "ACTION:" in line), None)
             lots_line = next((line for line in lines if "lots" in line), None)
             option_type_line = next((line for line in lines if "STRIKE:" in line), None)
@@ -94,7 +89,7 @@ def summarize_alerts(alerts: list[str]) -> str:
 
             if all([symbol_match, action_match, lots_match, option_type_match, future_price_match, price_change_match]):
                 symbol = symbol_match.group(1).strip()
-                if symbol == "ICICI": symbol = "ICICIBANK" # Normalize symbol
+                if symbol == "ICICI": symbol = "ICICIBANK"
                 action = action_match.group(1)
                 lots = int(lots_match.group(1))
                 option_type = option_type_match.group(2)
@@ -106,11 +101,8 @@ def summarize_alerts(alerts: list[str]) -> str:
                 data["future_prices"].append(future_price)
                 data["last_price_change"] = price_change_indicator
                 logger.info(f"Successfully parsed alert for {symbol}.")
-
             else:
                 logger.warning(f"Failed to parse alert. Some fields were missing. Alert:\n---\n{alert}\n---")
-
-
         except (AttributeError, ValueError, IndexError) as e:
             logger.error(f"Critical parsing error for alert. Error: {e}. Alert text:\n---\n{alert}\n---")
             continue
@@ -129,15 +121,12 @@ def summarize_alerts(alerts: list[str]) -> str:
         last_price = prices[-1]
         price_arrow = data["last_price_change"]
 
-        # --- Formatting inspired by lalo.pdf ---
-        # Header
-        header_line1 = f"SYMBOL: {symbol}"
-        header_line2 = f"FUTURE PRICE: {last_price:.2f} {price_arrow}"
+        # --- New Formatting inspired by lalo.pdf ---
+        header_line = f"SYMBOL: {symbol:<10} FUTURE PRICE: {last_price:.2f} {price_arrow}"
         
-        # Table lines
         table_lines = [
-            f"{'ACTION':<18} {'CE LOTS':<10} {'PE LOTS':<10}",
-            f"{'-'*18:<18} {'-'*10:<10} {'-'*10:<10}"
+            f"{'ACTION':<19} {'CE LOTS':<10} {'PE LOTS':<10}",
+            f"{'-'*19:<19} {'-'*10:<10} {'-'*10:<10}"
         ]
         
         action_order = [
@@ -145,32 +134,29 @@ def summarize_alerts(alerts: list[str]) -> str:
             "WRITER(SHORT)", "REMOVE FROM SHORT", "REMOVE FROM LONG"
         ]
         
+        has_actions = False
         for action in action_order:
+            # Check if action exists for the symbol to include it
             if action in actions:
                 ce_lots = actions[action].get('CE', 0)
                 pe_lots = actions[action].get('PE', 0)
+                # Only add a row if there are lots to show
                 if ce_lots > 0 or pe_lots > 0:
-                    table_lines.append(f"{action:<18} {ce_lots:<10} {pe_lots:<10}")
+                    table_lines.append(f"{action:<19} {ce_lots:<10} {pe_lots:<10}")
+                    has_actions = True
 
-        # Only create a summary if there are actions to show
-        if len(table_lines) > 2:
-            symbol_summary = f"{header_line1}\n{header_line2}\n" + "\n".join(table_lines)
+        # Only create a summary block if there were actual actions with lots
+        if has_actions:
+            symbol_summary = f"{header_line}\n" + "\n".join(table_lines)
             final_summary_parts.append(symbol_summary)
 
     if not final_summary_parts:
-        # Also log this event for better debugging
-        logger.info("No actionable alerts were found after processing the buffer. Sending standard message.")
+        logger.info("No actionable alerts were found after processing the buffer.")
         return "No actionable alerts detected in the last interval."
 
-    # --- New: Create a single, clean report with a timestamp ---
-    current_time = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
-    report_header = f"📊 Aggregated Market Report at {current_time}\n"
-    
-    # Join each symbol's summary with a clear separator
-    report_body = "\n\n- - - - - - - - - - - - - - - -\n\n".join(final_summary_parts)
-    
-    # Wrap the entire report in a single code block
-    final_message = f"{report_header}\n```\n{report_body}\n```"
+    # --- New: Create a single, clean report wrapped in a code block ---
+    report_body = "\n\n".join(final_summary_parts)
+    final_message = f"```\n{report_body}\n```"
     
     logger.info(f"Successfully generated summary for {len(final_summary_parts)} symbols.")
     return final_message
