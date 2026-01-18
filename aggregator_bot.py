@@ -141,7 +141,7 @@ def summarize_alerts(alerts: list[str]) -> str:
                 ce_lots = actions[action_key].get('CE', 0)
                 pe_lots = actions[action_key].get('PE', 0)
                 if ce_lots > 0 or pe_lots > 0:
-                    display_name = action_name_map.get(action_key, action_key) # Use the mapped name
+                    display_name = action_name_map.get(action_key, action_key)
                     table_lines.append(f"{{display_name:<19}} {{ce_lots:<10}} {{pe_lots:<10}}")
                     has_actions = True
         if has_actions:
@@ -167,7 +167,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             MESSAGE_BUFFER.append(message_text)
         logger.info(f"Buffered 1 message from {SOURCE_CHAT_ID}.")
 
-async def aggregation__task(app: Application):
+async def aggregation_task(app: Application):
     try:
         await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v9) is LIVE. Aggregation task started.")
     except TelegramError as e:
@@ -208,8 +208,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # =========================
 def main():
     logger.info("🚀 Starting Final Aggregator Bot (v9)...")
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
-    
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()    
     app.add_handler(MessageHandler(filters.ALL, message_handler))
     app.add_error_handler(error_handler)
     
