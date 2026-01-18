@@ -62,7 +62,7 @@ def summarize_alerts(alerts: list[str]) -> str:
     })
 
     patterns = {
-        "symbol": re.compile(r"^([\w\s]+)\s*\|"),
+        "symbol": re.compile(r"^([\w\s]+?)\s*\|?\s*OPTION"),
         "action": re.compile(r"ACTION: ([\w\(\)]+)"),
         "lots": re.compile(r"\((\d+) lots\)"),
         "option_type": re.compile(r"STRIKE: \d+(CE|PE)"),
