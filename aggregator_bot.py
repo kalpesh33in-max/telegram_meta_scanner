@@ -52,9 +52,8 @@ def summarize_alerts(alerts: list[str]) -> str:
         "future_prices": [],
     })
 
-    # Regex patterns to find specific lines in the alert text
     patterns = {
-        "symbol": re.compile(r"^([\w\s]+?)\| "),
+        "symbol": re.compile(r"^([\w\s]+?)\s*||"),
         "action": re.compile(r"ACTION:\s*([\w\(\)-]+)"),
         "lots": re.compile(r"\((\d+)\s*lots\)"),
         "option_type": re.compile(r"STRIKE:\s*\d+(CE|PE)"),
@@ -79,7 +78,7 @@ def summarize_alerts(alerts: list[str]) -> str:
 
                 data = aggregated_data[symbol]
                 data["actions"][action][option_type] += lots
-                if future_price > 0: # Only append valid prices
+                if future_price > 0:
                     data["future_prices"].append(future_price)
             else:
                 logger.warning(f"Failed to parse alert. Some fields were missing in: {alert[:70]}...")
@@ -90,13 +89,22 @@ def summarize_alerts(alerts: list[str]) -> str:
     final_summary_parts = []
     sorted_symbols = sorted(aggregated_data.keys())
 
+    # Mapping for descriptive action names
+    action_name_map = {
+        "BUYER(LONG)": "Long Buildup",
+        "WRITER(SHORT)": "Short Buildup",
+        "REMOVE FROM LONG": "Long Unwinding",
+        "REMOVE FROM SHORT": "Short Covering",
+        "HEDGING": "Hedging",
+        "REMOVE FROM HEDGE": "Hedge Removal"
+    }
+
     for symbol in sorted_symbols:
         data = aggregated_data[symbol]
         actions = data["actions"]
         prices = data["future_prices"]
         if not actions or not prices: continue
         
-        # Feature 1: More Accurate Price Direction
         first_price = prices[0]
         last_price = prices[-1]
         
@@ -108,12 +116,10 @@ def summarize_alerts(alerts: list[str]) -> str:
 
         header_line = f"SYMBOL: {symbol:<12} FUTURE PRICE: {last_price:.2f} {price_arrow}"
 
-        # Feature 2: Trading Signal
         bullish_score = actions["BUYER(LONG)"].get('CE', 0) + actions["WRITER(SHORT)"].get('PE', 0)
         bearish_score = actions["BUYER(LONG)"].get('PE', 0) + actions["WRITER(SHORT)"].get('CE', 0)
         
         signal = "Signal: Neutral"
-        # Define a threshold for a signal to be considered significant
         signal_threshold = 100 
 
         if bullish_score > bearish_score and bullish_score > signal_threshold:
@@ -127,17 +133,18 @@ def summarize_alerts(alerts: list[str]) -> str:
             f"{{'ACTION':<19}} {{'CE LOTS':<10}} {{'PE LOTS':<10}}",
             f"{{'-'*19:<19}} {{'-'*10:<10}} {{'-'*10:<10}}"
         ]
-        action_order = ["HEDGING", "REMOVE FROM HEDGE", "BUYER(LONG)", "WRITER(SHORT)", "REMOVE FROM SHORT", "REMOVE FROM LONG"]
+        
+        action_order = ["BUYER(LONG)", "WRITER(SHORT)", "REMOVE FROM LONG", "REMOVE FROM SHORT", "HEDGING", "REMOVE FROM HEDGE"]
         has_actions = False
-        for action in action_order:
-            if action in actions:
-                ce_lots = actions[action].get('CE', 0)
-                pe_lots = actions[action].get('PE', 0)
+        for action_key in action_order:
+            if action_key in actions:
+                ce_lots = actions[action_key].get('CE', 0)
+                pe_lots = actions[action_key].get('PE', 0)
                 if ce_lots > 0 or pe_lots > 0:
-                    table_lines.append(f"{{action:<19}} {{ce_lots:<10}} {{pe_lots:<10}}")
+                    display_name = action_name_map.get(action_key, action_key) # Use the mapped name
+                    table_lines.append(f"{{display_name:<19}} {{ce_lots:<10}} {{pe_lots:<10}}")
                     has_actions = True
         if has_actions:
-            # Combine all parts for the final symbol summary
             symbol_summary = f"{header_line}\n{signal_line}\n" + "\n".join(table_lines)
             final_summary_parts.append(symbol_summary)
 
@@ -160,9 +167,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             MESSAGE_BUFFER.append(message_text)
         logger.info(f"Buffered 1 message from {SOURCE_CHAT_ID}.")
 
-async def aggregation_task(app: Application):
+async def aggregation__task(app: Application):
     try:
-        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v8) is LIVE. Aggregation task started.")
+        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v9) is LIVE. Aggregation task started.")
     except TelegramError as e:
         logger.warning(f"Could not send startup message from aggregation_task: {e}")
 
@@ -200,7 +207,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # MAIN
 # =========================
 def main():
-    logger.info("🚀 Starting Final Aggregator Bot (v8)...")
+    logger.info("🚀 Starting Final Aggregator Bot (v9)...")
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
     
     app.add_handler(MessageHandler(filters.ALL, message_handler))
