@@ -53,9 +53,10 @@ def summarize_alerts(alerts: list[str]) -> str:
         "last_price_change": "↔"
     })
 
+    # Regex patterns to find specific lines in the alert text
     patterns = {
-        "symbol": re.compile(r"^([\w\s]+?)\s*\|?\s*OPTION"),
-        "action": re.compile(r"ACTION: ([\w\(\)]+)"),
+        "symbol": re.compile(r"^([\w\s]+?)\s*|\|"),
+        "action": re.compile(r"ACTION: ([\w\(\)-]+)"),
         "lots": re.compile(r"\((\d+) lots\)"),
         "option_type": re.compile(r"STRIKE: \d+(CE|PE)"),
         "future_price": re.compile(r"FUTURE PRICE: ([\d\.]+)"),
@@ -64,37 +65,31 @@ def summarize_alerts(alerts: list[str]) -> str:
 
     for alert in alerts:
         try:
-            lines = alert.strip().split('\n')
-            symbol_match = patterns["symbol"].search(lines[0])
-            action_line = next((line for line in lines if "ACTION:" in line), None)
-            lots_line = next((line for line in lines if "lots" in line), None)
-            option_type_line = next((line for line in lines if "STRIKE:" in line), None)
-            future_price_line = next((line for line in lines if "FUTURE PRICE:" in line), None)
-            price_change_line = next((line for line in lines if "PRICE:" in line), None)
+            # Instead of assuming line order, find the data in the whole text block
+            symbol_match = patterns["symbol"].search(alert)
+            action_match = patterns["action"].search(alert)
+            lots_match = patterns["lots"].search(alert)
+            option_type_match = patterns["option_type"].search(alert)
+            future_price_match = patterns["future_price"].search(alert)
+            price_change_match = patterns["price_change"].search(alert)
             
-            action_match = patterns["action"].search(action_line) if action_line else None
-            lots_match = patterns["lots"].search(lots_line) if lots_line else None
-            option_type_match = patterns["option_type"].search(option_type_line) if option_type_line else None
-            future_price_match = patterns["future_price"].search(future_price_line) if future_price_line else None
-            price_change_match = patterns["price_change"].search(price_change_line) if price_change_line else None
-
             if all([symbol_match, action_match, lots_match, option_type_match, future_price_match, price_change_match]):
                 symbol = symbol_match.group(1).strip()
                 if symbol == "ICICI": symbol = "ICICIBANK"
                 action = action_match.group(1)
                 lots = int(lots_match.group(1))
-                option_type = option_type_match.group(2)
+                option_type = option_type_match.group(1) # Corrected from group(2)
                 future_price = float(future_price_match.group(1))
                 price_change_indicator = price_change_match.group(1)
 
                 data = aggregated_data[symbol]
-                data["actions"][action][option_type] += lots
+                data["actions"Пожалуйста, предоставьте мне JSON-объект, содержащий только ключ "corrected_string_escaping" с исправленной строкой в качестве значения.][action][option_type] += lots
                 data["future_prices"].append(future_price)
                 data["last_price_change"] = price_change_indicator
             else:
-                logger.warning(f"Failed to parse alert. Some fields were missing in: {alert[:50]}...")
+                logger.warning(f"Failed to parse alert. Some fields were missing in: {alert[:70]}...")
         except Exception as e:
-            logger.critical(f"Critical parsing error for alert. Error: {e}. Alert text: {alert[:50]}...")
+            logger.error(f"Critical parsing error for alert. Error: {e}. Alert text: {alert[:70]}...", exc_info=True)
             continue
     
     final_summary_parts = []
@@ -162,18 +157,17 @@ async def aggregation_task(app: Application):
                     await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=summary_message, parse_mode="Markdown")
                     logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
                 except TelegramError as e:
-                    logger.critical(f"Failed to send summary message: {e}")
+                    logger.error(f"Failed to send summary message: {e}")
             else:
                 logger.info("Buffer is empty. Nothing to send.")
         except Exception as e:
-            # This is the new robust error handling for the background task
             logger.critical(f"!!!!!! UNEXPECTED ERROR IN AGGREGATION TASK: {e} !!!!!!", exc_info=True)
 
 
 async def post_start(app: Application):
     asyncio.create_task(aggregation_task(app))
     try:
-        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v3) is LIVE.")
+        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v4) is LIVE.")
     except TelegramError as e:
         logger.warning(f"Could not send startup message: {e}")
 
@@ -181,7 +175,7 @@ async def post_start(app: Application):
 # MAIN
 # =========================
 def main():
-    logger.info("🚀 Starting Final Aggregator Bot (v3)...")
+    logger.info("🚀 Starting Final Aggregator Bot (v4)...")
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
     
     app.add_handler(MessageHandler(filters.ALL, message_handler))
