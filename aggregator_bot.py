@@ -45,7 +45,7 @@ BUFFER_LOCK = asyncio.Lock()
 def summarize_alerts(alerts: list[str]) -> str:
     logger.info(f"Summarizer received {len(alerts)} alerts to process.")
     if not alerts:
-        return ""
+        return "No actionable alerts detected in the last interval."
 
     aggregated_data = defaultdict(lambda: {
         "actions": defaultdict(lambda: {'CE': 0, 'PE': 0}),
@@ -55,7 +55,7 @@ def summarize_alerts(alerts: list[str]) -> str:
 
     # Regex patterns to find specific lines in the alert text
     patterns = {
-        "symbol": re.compile(r"^([\w\s]+?)\s*|\|"),
+        "symbol": re.compile(r"^([\w\s]+?)\s*|?s*OPTION"),
         "action": re.compile(r"ACTION: ([\w\(\)-]+)"),
         "lots": re.compile(r"\((\d+) lots\)"),
         "option_type": re.compile(r"STRIKE: \d+(CE|PE)"),
@@ -78,18 +78,18 @@ def summarize_alerts(alerts: list[str]) -> str:
                 if symbol == "ICICI": symbol = "ICICIBANK"
                 action = action_match.group(1)
                 lots = int(lots_match.group(1))
-                option_type = option_type_match.group(1) # Corrected from group(2)
+                option_type = option_type_match.group(1)
                 future_price = float(future_price_match.group(1))
                 price_change_indicator = price_change_match.group(1)
 
                 data = aggregated_data[symbol]
-                data["actions"Пожалуйста, предоставьте мне JSON-объект, содержащий только ключ "corrected_string_escaping" с исправленной строкой в качестве значения.][action][option_type] += lots
+                data["actions"][action][option_type] += lots
                 data["future_prices"].append(future_price)
                 data["last_price_change"] = price_change_indicator
             else:
                 logger.warning(f"Failed to parse alert. Some fields were missing in: {alert[:70]}...")
         except Exception as e:
-            logger.error(f"Critical parsing error for alert. Error: {e}. Alert text: {alert[:70]}...", exc_info=True)
+            logger.critical(f"!!!!!! UNEXPECTED ERROR DURING ALERT PARSING: {e}. Alert text: {alert[:70]}...", exc_info=True)
             continue
     
     final_summary_parts = []
@@ -140,6 +140,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Buffered 1 message from {SOURCE_CHAT_ID}.")
 
 async def aggregation_task(app: Application):
+    # Send startup message here once the task is active
+    try:
+        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v5) is LIVE. Aggregation task started.")
+    except TelegramError as e:
+        logger.warning(f"Could not send startup message from aggregation_task: {e}")
+
     while True:
         try:
             await asyncio.sleep(AGGREGATION_INTERVAL_SECONDS)
@@ -165,20 +171,25 @@ async def aggregation_task(app: Application):
 
 
 async def post_start(app: Application):
+    # Just create the aggregation task, the startup message is now inside the task
     asyncio.create_task(aggregation_task(app))
-    try:
-        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v4) is LIVE.")
-    except TelegramError as e:
-        logger.warning(f"Could not send startup message: {e}")
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a traceback to the user."""
+    logger.error(f"Update {update} caused error {context.error}", exc_info=True)
+    # Optionally, send an error message to the admin
+    # if update and update.effective_chat:
+    #     await update.effective_chat.send_message("An unexpected error occurred!")
 
 # =========================
 # MAIN
 # =========================
 def main():
-    logger.info("🚀 Starting Final Aggregator Bot (v4)...")
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
+    logger.info("🚀 Starting Final Aggregator Bot (v5)... ")
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build() 
     
     app.add_handler(MessageHandler(filters.ALL, message_handler))
+    app.add_error_handler(error_handler) # Add a general error handler for the app
     
     app.run_polling()
 
