@@ -54,7 +54,7 @@ def summarize_alerts(alerts: list[str]) -> str:
     })
 
     patterns = {
-        "symbol": re.compile(r"^([\w\s]+?)\s*|?\s*OPTION"),
+        "symbol": re.compile(r"^([\w\s]+?)\s*|?s*OPTION"),
         "action": re.compile(r"ACTION: ([\w\(\)]+)"),
         "lots": re.compile(r"\((\d+) lots\)"),
         "option_type": re.compile(r"STRIKE: \d+(CE|PE)"),
@@ -135,9 +135,20 @@ def summarize_alerts(alerts: list[str]) -> str:
 # TELEGRAM BOT HANDLERS
 # =========================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.channel_post or update.channel_post.chat_id != SOURCE_CHAT_ID:
+    """
+    This handler now catches ALL messages and filters manually.
+    This is more robust than relying on library filters.
+    """
+    # Check if the update is a channel post. If not, ignore.
+    if not update.channel_post:
+        return
+
+    # Check if the channel post is from our specific source channel. If not, ignore.
+    if update.channel_post.chat.id != SOURCE_CHAT_ID:
+        logger.info(f"Ignoring message from other channel: {update.channel_post.chat.id}")
         return
     
+    # If we get here, it's a message from our source channel. Process it.
     message_text = update.channel_post.text
     if message_text:
         async with BUFFER_LOCK:
@@ -168,7 +179,7 @@ async def aggregation_task(app: Application):
 async def post_start(app: Application):
     asyncio.create_task(aggregation_task(app))
     try:
-        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot is LIVE.")
+        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v2) is LIVE.")
     except TelegramError as e:
         logger.warning(f"Could not send startup message: {e}")
 
@@ -176,9 +187,12 @@ async def post_start(app: Application):
 # MAIN
 # =========================
 def main():
-    logger.info("🚀 Starting Final Aggregator Bot...")
+    logger.info("🚀 Starting Final Aggregator Bot (v2)...")
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
-    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, message_handler))
+    
+    # Use a universal handler to catch all messages and filter manually inside the function.
+    app.add_handler(MessageHandler(filters.ALL, message_handler))
+    
     app.run_polling()
 
 if __name__ == "__main__":
