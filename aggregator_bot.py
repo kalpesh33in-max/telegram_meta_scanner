@@ -31,7 +31,7 @@ try:
     BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
     SOURCE_CHAT_ID = int(os.environ["SOURCE_CHAT_ID"])
     TARGET_CHAT_ID = int(os.environ["TARGET_CHAT_ID"])
-    AGGREGATION_INTERVAL_SECONDS = int(os.getenv("AGGREGATION_INTERVAL", 10))
+    AGGREGATION_INTERVAL_SECONDS = int(os.getenv("AGGREGATION_INTERVAL", 60))
 except (KeyError, ValueError) as e:
     logger.critical(f"❌ Critical Error: Environment variable {e} is not set or invalid.")
     raise SystemExit(f"Stopping bot. Please set a valid {e} environment variable.")
@@ -43,89 +43,160 @@ BUFFER_LOCK = asyncio.Lock()
 # MESSAGE SUMMARIZER
 # =========================
 def summarize_alerts(alerts: list[str]) -> str:
-    logger.info(f"Filtering {len(alerts)} received alerts.")
-    
-    passed_alerts = []
-    
+    logger.info(f"Summarizer received {len(alerts)} alerts to process.")
+    if not alerts:
+        return "No actionable alerts detected in the last interval."
+
+    aggregated_data = defaultdict(lambda: {
+        "actions": defaultdict(lambda: {'CE': 0, 'PE': 0}),
+        "future_prices": [],
+    })
+
+    # Corrected regex patterns
     patterns = {
-        "symbol": re.compile(r"Symbol: (.*?)\n"),
-        "action": re.compile(r"🚨 (.*?)\n"),
-        "oi_change": re.compile(r"OI CHANGE\s+:\s*([+-]?[0-9,]+)"),
-        "price": re.compile(r"PRICE:\s*([\d\.]+)"),
+        "symbol": re.compile(r"^([\w\s]+)\s*||"), # Made this greedy to capture full name
+        "action": re.compile(r"ACTION:\s*([\w\(\)-]+)"),
+        "lots": re.compile(r"\((\d+)\s*lots\)"),
+        "option_type": re.compile(r"STRIKE:\s*\d+(CE|PE)"),
+        "future_price": re.compile(r"FUTURE PRICE:\s*([\d\.]+)"),
     }
 
     for alert in alerts:
         try:
             symbol_match = patterns["symbol"].search(alert)
-            if not symbol_match:
-                logger.warning(f"Could not parse symbol from alert: {alert[:70]}...")
-                continue
-            
-            symbol = symbol_match.group(1).strip()
-
-            # New logic for Future alerts: only forward if it's a "BLAST"
-            if symbol.endswith("-I"):
-                if "🚀 BLAST 🚀" in alert:
-                    logger.info(f"Forwarding BLAST future alert for {symbol}.")
-                    passed_alerts.append(alert)
-                else:
-                    logger.info(f"Skipping non-BLAST future alert for {symbol}.")
-                continue
-
-            # Existing logic for Option alerts
             action_match = patterns["action"].search(alert)
-            oi_change_match = patterns["oi_change"].search(alert)
-            price_match = patterns["price"].search(alert)
+            lots_match = patterns["lots"].search(alert)
+            option_type_match = patterns["option_type"].search(alert)
+            future_price_match = patterns["future_price"].search(alert)
+            
+            if all([symbol_match, action_match, lots_match, option_type_match, future_price_match]):
+                symbol = symbol_match.group(1).strip()
+                if symbol == "ICICI": symbol = "ICICIBANK"
+                action = action_match.group(1)
+                lots = int(lots_match.group(1))
+                option_type = option_type_match.group(1)
+                future_price = float(future_price_match.group(1))
 
-            if not all([action_match, oi_change_match, price_match]):
-                logger.warning(f"Could not parse required fields for option alert: {alert[:70]}...")
-                continue
-
-            action = action_match.group(1).strip()
-            price = float(price_match.group(1))
-            oi_change = int(oi_change_match.group(1).replace(",", ""))
-            
-            turnover_value = oi_change * price
-            
-            should_forward = False
-            
-            if turnover_value >= 10000000:
-                should_forward = True
-                logger.info(f"Option alert for {symbol} meets positive turnover criteria: {turnover_value:,.0f}")
-            elif action.upper() in ["LONG UNWINDING", "SHORT COVERING"] and abs(turnover_value) >= 10000000:
-                should_forward = True
-                logger.info(f"Option alert for {symbol} meets unwinding/covering turnover criteria: {turnover_value:,.0f}")
-            
-            if should_forward:
-                passed_alerts.append(alert)
+                data = aggregated_data[symbol]
+                data["actions"][action][option_type] += lots
+                if future_price > 0:
+                    data["future_prices"].append(future_price)
             else:
-                logger.info(f"Skipping option alert for {symbol} due to low turnover or not meeting action criteria: {turnover_value:,.0f}")
-
+                logger.warning(f"Failed to parse alert. Some fields were missing in: {alert[:70]}...")
         except Exception as e:
-            logger.error(f"Error processing alert: {e}. Alert text: {alert[:70]}...", exc_info=True)
+            logger.critical(f"!!!!!! UNEXPECTED ERROR DURING ALERT PARSING: {e}. Alert text: {alert[:70]}...", exc_info=True)
             continue
-            
-    if not passed_alerts:
-        return "" 
+    
+    final_summary_parts = []
+    sorted_symbols = sorted(aggregated_data.keys())
+
+    # Mapping for descriptive action names
+    action_name_map = {
+        "BUYER(LONG)": "Long Buildup",
+        "WRITER(SHORT)": "Short Buildup",
+        "REMOVE FROM LONG": "Long Unwinding",
+        "REMOVE FROM SHORT": "Short Covering",
+        "HEDGING": "Hedging",
+        "REMOVE FROM HEDGE": "Hedge Removal"
+    }
+
+    for symbol in sorted_symbols:
+        data = aggregated_data[symbol]
+        actions = data["actions"]
+        prices = data["future_prices"]
+        if not actions or not prices: continue
         
-    return "\n\n---\n\n".join(passed_alerts)
+        # Feature 1: More Accurate Price Direction
+        first_price = prices[0]
+        last_price = prices[-1]
+        
+        price_arrow = "↔"
+        if last_price > first_price:
+            price_arrow = "↑"
+        elif last_price < first_price:
+            price_arrow = "↓"
+
+        header_line = f"SYMBOL: {symbol:<12} FUTURE PRICE: {last_price:.2f} {price_arrow}"
+
+        # Feature 2: Trading Signal
+        bullish_score = actions["BUYER(LONG)"].get('CE', 0) + actions["WRITER(SHORT)"].get('PE', 0)
+        bearish_score = actions["BUYER(LONG)"].get('PE', 0) + actions["WRITER(SHORT)"].get('CE', 0)
+        
+        signal = "Signal: Neutral"
+        signal_threshold = 100 
+
+        if bullish_score > bearish_score and bullish_score > signal_threshold:
+            signal = "Signal: Buy CE"
+        elif bearish_score > bullish_score and bearish_score > signal_threshold:
+            signal = "Signal: Buy PE"
+        
+        signal_line = signal
+
+        table_lines = [
+            f"{{'ACTION':<19}} {{'CE LOTS':<10}} {{'PE LOTS':<10}}",
+            f"{{'-'*19:<19}} {{'-'*10:<10}} {{'-'*10:<10}}"
+        ]
+        
+        action_order = ["BUYER(LONG)", "WRITER(SHORT)", "REMOVE FROM LONG", "REMOVE FROM SHORT", "HEDGING", "REMOVE FROM HEDGE"]
+        has_actions = False
+        for action_key in action_order:
+            if action_key in actions:
+                ce_lots = actions[action_key].get('CE', 0)
+                pe_lots = actions[action_key].get('PE', 0)
+                if ce_lots > 0 or pe_lots > 0:
+                    display_name = action_name_map.get(action_key, action_key)
+                    table_lines.append(f"{display_name:<19} {ce_lots:<10} {pe_lots:<10}")
+                    has_actions = True
+        if has_actions:
+            symbol_summary = f"{header_line}\n{signal_line}\n" + "\n".join(table_lines)
+            final_summary_parts.append(symbol_summary)
+
+    if not final_summary_parts:
+        return "No actionable alerts detected in the last interval."
+
+    report_body = "\n\n".join(final_summary_parts)
+    return f"```\n{report_body}\n```"
 
 # =========================
 # TELEGRAM BOT HANDLERS
 # =========================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.channel_post or update.channel_post.chat.id != SOURCE_CHAT_ID:
+    # --- Start of Debugging Code ---
+    chat_id = "N/A"
+    update_type = "Unknown"
+    
+    if update.channel_post:
+        chat_id = update.channel_post.chat.id
+        update_type = "Channel Post"
+        logger.info(f"DEBUG: Received a {update_type} from chat ID: {chat_id}")
+    elif update.message:
+        chat_id = update.message.chat.id
+        update_type = "Regular Message"
+        logger.info(f"DEBUG: Received a {update_type} from chat ID: {chat_id}")
+    else:
+        logger.info("DEBUG: Received an update that was not a channel post or a regular message.")
+        logger.debug(f"Full update object: {update}")
+        return
+
+    # Compare with expected source ID, converting both to string for safe comparison
+    if str(chat_id) != str(SOURCE_CHAT_ID):
+        logger.warning(f"DEBUG: Received message from chat ID {chat_id}, but expected {SOURCE_CHAT_ID}. IGNORING.")
+        return
+    # --- End of Debugging Code ---
+
+    # Original logic continues here if the message is from the correct source
+    if not update.channel_post:
         return
     
     message_text = update.channel_post.text
     if message_text:
         async with BUFFER_LOCK:
             MESSAGE_BUFFER.append(message_text)
-        logger.info(f"Buffered 1 message from {SOURCE_CHAT_ID}.")
+        logger.info(f"Successfully buffered 1 message from source {SOURCE_CHAT_ID}.")
 
 async def aggregation_task(app: Application):
     try:
-        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v7) is LIVE. Aggregation task started.")
+        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v10) is LIVE. Aggregation task started.")
     except TelegramError as e:
         logger.warning(f"Could not send startup message from aggregation_task: {e}")
 
@@ -142,17 +213,11 @@ async def aggregation_task(app: Application):
             if alerts_to_process:
                 logger.info(f"Processing {len(alerts_to_process)} alerts from buffer.")
                 summary_message = summarize_alerts(alerts_to_process)
-                
-                # Only send a message if there is content to send
-                if summary_message:
-                    try:
-                        # Use HTML parse mode for better formatting control if needed, though Markdown is fine
-                        await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=summary_message, parse_mode="Markdown")
-                        logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
-                    except TelegramError as e:
-                        logger.error(f"Failed to send summary message: {e}")
-                else:
-                    logger.info("No alerts met the criteria to be sent.")
+                try:
+                    await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=summary_message, parse_mode="Markdown")
+                    logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
+                except TelegramError as e:
+                    logger.error(f"Failed to send summary message: {e}")
             else:
                 logger.info("Buffer is empty. Nothing to send.")
         except Exception as e:
@@ -169,7 +234,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # MAIN
 # =========================
 def main():
-    logger.info("🚀 Starting Final Aggregator Bot (v7)...")
+    logger.info("🚀 Starting Final Aggregator Bot (v10)...")
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
     
     app.add_handler(MessageHandler(filters.ALL, message_handler))
