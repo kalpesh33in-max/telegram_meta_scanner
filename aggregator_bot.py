@@ -43,88 +43,72 @@ BUFFER_LOCK = asyncio.Lock()
 # MESSAGE SUMMARIZER
 # =========================
 def summarize_alerts(alerts: list[str]) -> str:
-    logger.info(f"Summarizer received {len(alerts)} alerts to process.")
-    if not alerts:
-        return "No actionable alerts detected in the last interval."
-
-    aggregated_data = defaultdict(lambda: {
-        "actions": defaultdict(lambda: {'CE': 0, 'PE': 0}),
-        "future_prices": [],
-        "last_price_change": "↔"
-    })
-
-    # Regex patterns to find specific lines in the alert text
+    logger.info(f"Filtering {len(alerts)} received alerts.")
+    
+    passed_alerts = []
+    
     patterns = {
-        "symbol": re.compile(r"^([\w\s]+?)\s*||"),
-        "action": re.compile(r"ACTION:\s*([\w\(\)-]+)"),
-        "lots": re.compile(r"\((\d+)\s*lots\)"),
-        "option_type": re.compile(r"STRIKE:\s*\d+(CE|PE)"),
-        "future_price": re.compile(r"FUTURE PRICE:\s*([\d\.]+)"),
-        "price_change": re.compile(r"PRICE:\s*(↑|↓|↔)")
+        "symbol": re.compile(r"Symbol: (.*?)\n"),
+        "action": re.compile(r"🚨 (.*?)\n"),
+        "oi_change": re.compile(r"OI CHANGE\s+:\s*([+-]?[0-9,]+)"),
+        "price": re.compile(r"PRICE:\s*([\d\.]+)"),
     }
 
     for alert in alerts:
         try:
             symbol_match = patterns["symbol"].search(alert)
-            action_match = patterns["action"].search(alert)
-            lots_match = patterns["lots"].search(alert)
-            option_type_match = patterns["option_type"].search(alert)
-            future_price_match = patterns["future_price"].search(alert)
-            price_change_match = patterns["price_change"].search(alert)
+            if not symbol_match:
+                logger.warning(f"Could not parse symbol from alert: {alert[:70]}...")
+                continue
             
-            if all([symbol_match, action_match, lots_match, option_type_match, future_price_match, price_change_match]):
-                symbol = symbol_match.group(1).strip()
-                if symbol == "ICICI": symbol = "ICICIBANK"
-                action = action_match.group(1)
-                lots = int(lots_match.group(1))
-                option_type = option_type_match.group(1)
-                future_price = float(future_price_match.group(1))
-                price_change_indicator = price_change_match.group(1)
+            symbol = symbol_match.group(1).strip()
 
-                data = aggregated_data[symbol]
-                data["actions"][action][option_type] += lots
-                data["future_prices"].append(future_price)
-                data["last_price_change"] = price_change_indicator
+            # New logic for Future alerts: only forward if it's a "BLAST"
+            if symbol.endswith("-I"):
+                if "🚀 BLAST 🚀" in alert:
+                    logger.info(f"Forwarding BLAST future alert for {symbol}.")
+                    passed_alerts.append(alert)
+                else:
+                    logger.info(f"Skipping non-BLAST future alert for {symbol}.")
+                continue
+
+            # Existing logic for Option alerts
+            action_match = patterns["action"].search(alert)
+            oi_change_match = patterns["oi_change"].search(alert)
+            price_match = patterns["price"].search(alert)
+
+            if not all([action_match, oi_change_match, price_match]):
+                logger.warning(f"Could not parse required fields for option alert: {alert[:70]}...")
+                continue
+
+            action = action_match.group(1).strip()
+            price = float(price_match.group(1))
+            oi_change = int(oi_change_match.group(1).replace(",", ""))
+            
+            turnover_value = oi_change * price
+            
+            should_forward = False
+            
+            if turnover_value >= 10000000:
+                should_forward = True
+                logger.info(f"Option alert for {symbol} meets positive turnover criteria: {turnover_value:,.0f}")
+            elif action.upper() in ["LONG UNWINDING", "SHORT COVERING"] and abs(turnover_value) >= 10000000:
+                should_forward = True
+                logger.info(f"Option alert for {symbol} meets unwinding/covering turnover criteria: {turnover_value:,.0f}")
+            
+            if should_forward:
+                passed_alerts.append(alert)
             else:
-                logger.warning(f"Failed to parse alert. Some fields were missing in: {alert[:70]}...")
+                logger.info(f"Skipping option alert for {symbol} due to low turnover or not meeting action criteria: {turnover_value:,.0f}")
+
         except Exception as e:
-            logger.critical(f"!!!!!! UNEXPECTED ERROR DURING ALERT PARSING: {e}. Alert text: {alert[:70]}...", exc_info=True)
+            logger.error(f"Error processing alert: {e}. Alert text: {alert[:70]}...", exc_info=True)
             continue
-    
-    final_summary_parts = []
-    sorted_symbols = sorted(aggregated_data.keys())
-
-    for symbol in sorted_symbols:
-        data = aggregated_data[symbol]
-        actions = data["actions"]
-        prices = data["future_prices"]
-        if not actions or not prices: continue
+            
+    if not passed_alerts:
+        return "" 
         
-        last_price = prices[-1]
-        price_arrow = data["last_price_change"]
-        # Adjusted padding for the symbol name
-        header_line = f"SYMBOL: {symbol:<12} FUTURE PRICE: {last_price:.2f} {price_arrow}"
-        table_lines = [
-            f"{'ACTION':<19} {'CE LOTS':<10} {'PE LOTS':<10}",
-            f"{'-'*19:<19} {'-'*10:<10} {'-'*10:<10}"
-        ]
-        action_order = ["HEDGING", "REMOVE FROM HEDGE", "BUYER(LONG)", "WRITER(SHORT)", "REMOVE FROM SHORT", "REMOVE FROM LONG"]
-        has_actions = False
-        for action in action_order:
-            if action in actions:
-                ce_lots = actions[action].get('CE', 0)
-                pe_lots = actions[action].get('PE', 0)
-                if ce_lots > 0 or pe_lots > 0:
-                    table_lines.append(f"{action:<19} {ce_lots:<10} {pe_lots:<10}")
-                    has_actions = True
-        if has_actions:
-            final_summary_parts.append(f"{header_line}\n" + "\n".join(table_lines))
-
-    if not final_summary_parts:
-        return "No actionable alerts detected in the last interval."
-
-    report_body = "\n\n".join(final_summary_parts)
-    return f"```\n{report_body}\n```"
+    return "\n\n---\n\n".join(passed_alerts)
 
 # =========================
 # TELEGRAM BOT HANDLERS
@@ -158,11 +142,17 @@ async def aggregation_task(app: Application):
             if alerts_to_process:
                 logger.info(f"Processing {len(alerts_to_process)} alerts from buffer.")
                 summary_message = summarize_alerts(alerts_to_process)
-                try:
-                    await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=summary_message, parse_mode="Markdown")
-                    logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
-                except TelegramError as e:
-                    logger.error(f"Failed to send summary message: {e}")
+                
+                # Only send a message if there is content to send
+                if summary_message:
+                    try:
+                        # Use HTML parse mode for better formatting control if needed, though Markdown is fine
+                        await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=summary_message, parse_mode="Markdown")
+                        logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
+                    except TelegramError as e:
+                        logger.error(f"Failed to send summary message: {e}")
+                else:
+                    logger.info("No alerts met the criteria to be sent.")
             else:
                 logger.info("Buffer is empty. Nothing to send.")
         except Exception as e:
