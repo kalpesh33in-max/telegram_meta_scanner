@@ -43,119 +43,72 @@ BUFFER_LOCK = asyncio.Lock()
 # MESSAGE SUMMARIZER
 # =========================
 def summarize_alerts(alerts: list[str]) -> str:
-    logger.info(f"Summarizer received {len(alerts)} alerts to process.")
-    if not alerts:
-        return "No actionable alerts detected in the last interval."
-
-    aggregated_data = defaultdict(lambda: {
-        "actions": defaultdict(lambda: {'CE': 0, 'PE': 0}),
-        "future_prices": [],
-    })
-
-    # Corrected regex patterns
+    logger.info(f"Filtering {len(alerts)} received alerts.")
+    
+    passed_alerts = []
+    
     patterns = {
-        "symbol": re.compile(r"^([\w\s]+)\s*||"), # Made this greedy to capture full name
-        "action": re.compile(r"ACTION:\s*([\w\(\)-]+)"),
-        "lots": re.compile(r"\((\d+)\s*lots\)"),
-        "option_type": re.compile(r"STRIKE:\s*\d+(CE|PE)"),
-        "future_price": re.compile(r"FUTURE PRICE:\s*([\d\.]+)"),
+        "symbol": re.compile(r"Symbol: (.*?)\n"),
+        "action": re.compile(r"🚨 (.*?)\n"),
+        "oi_change": re.compile(r"OI CHANGE\s+:\s*([+-]?[0-9,]+)"),
+        "price": re.compile(r"PRICE:\s*([\d\.]+)"),
     }
 
     for alert in alerts:
         try:
             symbol_match = patterns["symbol"].search(alert)
-            action_match = patterns["action"].search(alert)
-            lots_match = patterns["lots"].search(alert)
-            option_type_match = patterns["option_type"].search(alert)
-            future_price_match = patterns["future_price"].search(alert)
+            if not symbol_match:
+                logger.warning(f"Could not parse symbol from alert: {alert[:70]}...")
+                continue
             
-            if all([symbol_match, action_match, lots_match, option_type_match, future_price_match]):
-                symbol = symbol_match.group(1).strip()
-                if symbol == "ICICI": symbol = "ICICIBANK"
-                action = action_match.group(1)
-                lots = int(lots_match.group(1))
-                option_type = option_type_match.group(1)
-                future_price = float(future_price_match.group(1))
+            symbol = symbol_match.group(1).strip()
 
-                data = aggregated_data[symbol]
-                data["actions"][action][option_type] += lots
-                if future_price > 0:
-                    data["future_prices"].append(future_price)
+            # Logic for Future alerts: only forward if it's a "BLAST"
+            if symbol.endswith("-I"):
+                if "🚀 BLAST 🚀" in alert:
+                    logger.info(f"Forwarding BLAST future alert for {symbol}.")
+                    passed_alerts.append(alert)
+                else:
+                    logger.info(f"Skipping non-BLAST future alert for {symbol}.")
+                continue
+
+            # Logic for Option alerts
+            action_match = patterns["action"].search(alert)
+            oi_change_match = patterns["oi_change"].search(alert)
+            price_match = patterns["price"].search(alert)
+
+            if not all([action_match, oi_change_match, price_match]):
+                logger.warning(f"Could not parse required fields for option alert: {alert[:70]}...")
+                continue
+
+            action = action_match.group(1).strip()
+            price = float(price_match.group(1))
+            oi_change = int(oi_change_match.group(1).replace(",", ""))
+            
+            turnover_value = oi_change * price
+            
+            should_forward = False
+            
+            if turnover_value >= 10000000:
+                should_forward = True
+                logger.info(f"Option alert for {symbol} meets positive turnover criteria: {turnover_value:,.0f}")
+            elif action.upper() in ["LONG UNWINDING", "SHORT COVERING"] and abs(turnover_value) >= 10000000:
+                should_forward = True
+                logger.info(f"Option alert for {symbol} meets unwinding/covering turnover criteria: {turnover_value:,.0f}")
+            
+            if should_forward:
+                passed_alerts.append(alert)
             else:
-                logger.warning(f"Failed to parse alert. Some fields were missing in: {alert[:70]}...")
+                logger.info(f"Skipping option alert for {symbol} due to low turnover or not meeting action criteria: {turnover_value:,.0f}")
+
         except Exception as e:
-            logger.critical(f"!!!!!! UNEXPECTED ERROR DURING ALERT PARSING: {e}. Alert text: {alert[:70]}...", exc_info=True)
+            logger.error(f"Error processing alert: {e}. Alert text: {alert[:70]}...", exc_info=True)
             continue
-    
-    final_summary_parts = []
-    sorted_symbols = sorted(aggregated_data.keys())
-
-    # Mapping for descriptive action names
-    action_name_map = {
-        "BUYER(LONG)": "Long Buildup",
-        "WRITER(SHORT)": "Short Buildup",
-        "REMOVE FROM LONG": "Long Unwinding",
-        "REMOVE FROM SHORT": "Short Covering",
-        "HEDGING": "Hedging",
-        "REMOVE FROM HEDGE": "Hedge Removal"
-    }
-
-    for symbol in sorted_symbols:
-        data = aggregated_data[symbol]
-        actions = data["actions"]
-        prices = data["future_prices"]
-        if not actions or not prices: continue
+            
+    if not passed_alerts:
+        return "" 
         
-        # Feature 1: More Accurate Price Direction
-        first_price = prices[0]
-        last_price = prices[-1]
-        
-        price_arrow = "↔"
-        if last_price > first_price:
-            price_arrow = "↑"
-        elif last_price < first_price:
-            price_arrow = "↓"
-
-        header_line = f"SYMBOL: {symbol:<12} FUTURE PRICE: {last_price:.2f} {price_arrow}"
-
-        # Feature 2: Trading Signal
-        bullish_score = actions["BUYER(LONG)"].get('CE', 0) + actions["WRITER(SHORT)"].get('PE', 0)
-        bearish_score = actions["BUYER(LONG)"].get('PE', 0) + actions["WRITER(SHORT)"].get('CE', 0)
-        
-        signal = "Signal: Neutral"
-        signal_threshold = 100 
-
-        if bullish_score > bearish_score and bullish_score > signal_threshold:
-            signal = "Signal: Buy CE"
-        elif bearish_score > bullish_score and bearish_score > signal_threshold:
-            signal = "Signal: Buy PE"
-        
-        signal_line = signal
-
-        table_lines = [
-            f"{{'ACTION':<19}} {{'CE LOTS':<10}} {{'PE LOTS':<10}}",
-            f"{{'-'*19:<19}} {{'-'*10:<10}} {{'-'*10:<10}}"
-        ]
-        
-        action_order = ["BUYER(LONG)", "WRITER(SHORT)", "REMOVE FROM LONG", "REMOVE FROM SHORT", "HEDGING", "REMOVE FROM HEDGE"]
-        has_actions = False
-        for action_key in action_order:
-            if action_key in actions:
-                ce_lots = actions[action_key].get('CE', 0)
-                pe_lots = actions[action_key].get('PE', 0)
-                if ce_lots > 0 or pe_lots > 0:
-                    display_name = action_name_map.get(action_key, action_key)
-                    table_lines.append(f"{display_name:<19} {ce_lots:<10} {pe_lots:<10}")
-                    has_actions = True
-        if has_actions:
-            symbol_summary = f"{header_line}\n{signal_line}\n" + "\n".join(table_lines)
-            final_summary_parts.append(symbol_summary)
-
-    if not final_summary_parts:
-        return "No actionable alerts detected in the last interval."
-
-    report_body = "\n\n".join(final_summary_parts)
-    return f"```\n{report_body}\n```"
+    return "\n\n---\n\n".join(passed_alerts)
 
 # =========================
 # TELEGRAM BOT HANDLERS
@@ -235,12 +188,30 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # =========================
 def main():
     logger.info("🚀 Starting Final Aggregator Bot (v10)...")
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
     
-    app.add_handler(MessageHandler(filters.ALL, message_handler))
-    app.add_error_handler(error_handler)
-    
-    app.run_polling()
+    while True:
+        try:
+            app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
+            
+            app.add_handler(MessageHandler(filters.ALL, message_handler))
+            app.add_error_handler(error_handler)
+            
+            logger.info("Bot started, polling for updates...")
+            app.run_polling()
+
+        except TelegramError as e:
+            if "Conflict" in str(e):
+                logger.warning("Conflict detected. Another bot instance is running. Waiting 30 seconds before retrying...")
+                time.sleep(30)
+            else:
+                logger.critical(f"A critical Telegram error occurred: {e}", exc_info=True)
+                logger.info("Restarting after a delay...")
+                time.sleep(30)
+        except Exception as e:
+            logger.critical(f"An unexpected non-Telegram error occurred in main loop: {e}", exc_info=True)
+            logger.info("Restarting after a delay...")
+            time.sleep(30)
+
 
 if __name__ == "__main__":
     main()
