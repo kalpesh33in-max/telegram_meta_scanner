@@ -31,7 +31,7 @@ try:
     BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
     SOURCE_CHAT_ID = int(os.environ["SOURCE_CHAT_ID"])
     TARGET_CHAT_ID = int(os.environ["TARGET_CHAT_ID"])
-    AGGREGATION_INTERVAL_SECONDS = int(os.getenv("AGGREGATION_INTERVAL", 60))
+    AGGREGATION_INTERVAL_SECONDS = int(os.getenv("AGGREGATION_INTERVAL", 10))
 except (KeyError, ValueError) as e:
     logger.critical(f"❌ Critical Error: Environment variable {e} is not set or invalid.")
     raise SystemExit(f"Stopping bot. Please set a valid {e} environment variable.")
