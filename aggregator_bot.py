@@ -1,14 +1,9 @@
 import os
 import asyncio
-from datetime import datetime
-from collections import defaultdict
 import logging
 import re
-from zoneinfo import ZoneInfo
-
 from telegram import Update
 from telegram.ext import (
-    Application,
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
@@ -20,7 +15,7 @@ from telegram.error import TelegramError
 # LOGGING SETUP
 # =========================
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -31,187 +26,144 @@ try:
     BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
     SOURCE_CHAT_ID = int(os.environ["SOURCE_CHAT_ID"])
     TARGET_CHAT_ID = int(os.environ["TARGET_CHAT_ID"])
-    AGGREGATION_INTERVAL_SECONDS = int(os.getenv("AGGREGATION_INTERVAL", 60))
-except (KeyError, ValueError) as e:
-    logger.critical(f"❌ Critical Error: Environment variable {e} is not set or invalid.")
-    raise SystemExit(f"Stopping bot. Please set a valid {e} environment variable.")
+    # Reduced to 5 seconds for "Fast" updates
+    AGGREGATION_INTERVAL = int(os.getenv("AGGREGATION_INTERVAL", 5))
+except KeyError as e:
+    logger.critical(f"Missing Environment Variable: {e}")
+    raise SystemExit
 
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
 # =========================
-# MESSAGE SUMMARIZER
+# UTILITY: MONEYNESS & ACTION
 # =========================
-def summarize_alerts(alerts: list[str]) -> str:
-    logger.info(f"Filtering {len(alerts)} received alerts.")
-    
+def get_moneyness(symbol, fut_price):
+    try:
+        # Extracts 5 or 6 digit strike price
+        strike_match = re.search(r"(\d{5,6})", symbol)
+        if not strike_match: return ""
+        strike = float(strike_match.group(1))
+        opt_type = "CE" if "CE" in symbol else "PE"
+        
+        atm_threshold = fut_price * 0.001 # 0.1% Band
+        
+        if abs(strike - fut_price) <= atm_threshold:
+            return "ATM"
+        
+        if opt_type == "CE":
+            return "ITM" if strike < fut_price else "OTM"
+        else:
+            return "ITM" if strike > fut_price else "OTM"
+    except:
+        return ""
+
+def identify_participant(alert_text):
+    """Identifies the market participant based on scanner text."""
+    text = alert_text.upper()
+    if "SHORT COVERING" in text: return "SHORT COVERING ↗️"
+    if "LONG UNWINDING" in text: return "UNWINDING ⤵️"
+    if "WRITER" in text or "SHORT BUILDUP" in text: return "WRITER ✍️"
+    if "BUYER" in text or "LONG BUILDUP" in text: return "BUYER 🔵"
+    return "N/A"
+
+# =========================
+# MESSAGE PROCESSOR
+# =========================
+def process_alerts(alerts):
     passed_alerts = []
     
+    # Updated Regex to match your scanner format
     patterns = {
         "symbol": re.compile(r"Symbol: (.*?)\n"),
-        "action": re.compile(r"🚨 (.*?)\n"),
         "oi_change": re.compile(r"OI CHANGE\s+:\s*([+-]?[0-9,]+)"),
         "price": re.compile(r"PRICE:\s*([\d\.]+)"),
+        "fut_price": re.compile(r"FUT PRICE:\s*([\d\.]+)")
     }
 
     for alert in alerts:
         try:
-            symbol_match = patterns["symbol"].search(alert)
-            if not symbol_match:
-                logger.warning(f"Could not parse symbol from alert: {alert[:70]}...")
-                continue
-            
-            symbol = symbol_match.group(1).strip()
+            sym_m = patterns["symbol"].search(alert)
+            oi_m = patterns["oi_change"].search(alert)
+            pr_m = patterns["price"].search(alert)
+            fut_m = patterns["fut_price"].search(alert)
 
-            # Logic for Future alerts: only forward if it's a "BLAST"
+            if not all([sym_m, oi_m, pr_m]): continue
+
+            symbol = sym_m.group(1).strip()
+            # Logic: Only forward Future BLAST or Options > 1 Cr
             if symbol.endswith("-I"):
                 if "🚀 BLAST 🚀" in alert:
-                    logger.info(f"Forwarding BLAST future alert for {symbol}.")
-                    passed_alerts.append(alert)
-                else:
-                    logger.info(f"Skipping non-BLAST future alert for {symbol}.")
+                    passed_alerts.append(alert.strip())
                 continue
 
-            # Logic for Option alerts
-            action_match = patterns["action"].search(alert)
-            oi_change_match = patterns["oi_change"].search(alert)
-            price_match = patterns["price"].search(alert)
+            # Option Logic
+            price = float(pr_m.group(1))
+            oi_change = int(oi_m.group(1).replace(",", ""))
+            turnover_val = abs(oi_change * price)
 
-            if not all([action_match, oi_change_match, price_match]):
-                logger.warning(f"Could not parse required fields for option alert: {alert[:70]}...")
+            # FILTER: ONLY ABOVE 1 CRORE
+            if turnover_val < 10000000:
                 continue
 
-            action = action_match.group(1).strip()
-            price = float(price_match.group(1))
-            oi_change = int(oi_change_match.group(1).replace(",", ""))
+            turnover_cr = turnover_val / 10000000
+            action = identify_participant(alert)
             
-            turnover_value = oi_change * price
-            
-            should_forward = False
-            
-            if turnover_value >= 10000000:
-                should_forward = True
-                logger.info(f"Option alert for {symbol} meets positive turnover criteria: {turnover_value:,.0f}")
-            elif action.upper() in ["LONG UNWINDING", "SHORT COVERING"] and abs(turnover_value) >= 10000000:
-                should_forward = True
-                logger.info(f"Option alert for {symbol} meets unwinding/covering turnover criteria: {turnover_value:,.0f}")
-            
-            if should_forward:
-                passed_alerts.append(alert)
-            else:
-                logger.info(f"Skipping option alert for {symbol} due to low turnover or not meeting action criteria: {turnover_value:,.0f}")
+            moneyness = ""
+            if fut_m:
+                moneyness = f"| **{get_moneyness(symbol, float(fut_m.group(1)))}**"
+
+            # Formatted Output
+            formatted = (
+                f"🏷 **{symbol}**\n"
+                f"⚡ **{action}** {moneyness}\n"
+                f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
+                f"📊 Price: {price}"
+            )
+            passed_alerts.append(formatted)
 
         except Exception as e:
-            logger.error(f"Error processing alert: {e}. Alert text: {alert[:70]}...", exc_info=True)
+            logger.error(f"Parsing error: {e}")
             continue
             
-    if not passed_alerts:
-        return "" 
-        
     return "\n\n---\n\n".join(passed_alerts)
 
 # =========================
-# TELEGRAM BOT HANDLERS
+# TELEGRAM HANDLERS
 # =========================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # --- Start of Debugging Code ---
-    chat_id = "N/A"
-    update_type = "Unknown"
-    
-    if update.channel_post:
-        chat_id = update.channel_post.chat.id
-        update_type = "Channel Post"
-        logger.info(f"DEBUG: Received a {update_type} from chat ID: {chat_id}")
-    elif update.message:
-        chat_id = update.message.chat.id
-        update_type = "Regular Message"
-        logger.info(f"DEBUG: Received a {update_type} from chat ID: {chat_id}")
-    else:
-        logger.info("DEBUG: Received an update that was not a channel post or a regular message.")
-        logger.debug(f"Full update object: {update}")
-        return
-
-    # Compare with expected source ID, converting both to string for safe comparison
-    if str(chat_id) != str(SOURCE_CHAT_ID):
-        logger.warning(f"DEBUG: Received message from chat ID {chat_id}, but expected {SOURCE_CHAT_ID}. IGNORING.")
-        return
-    # --- End of Debugging Code ---
-
-    # Original logic continues here if the message is from the correct source
-    if not update.channel_post:
+    msg = update.channel_post or update.message
+    if not msg or str(msg.chat.id) != str(SOURCE_CHAT_ID):
         return
     
-    message_text = update.channel_post.text
-    if message_text:
+    if msg.text:
         async with BUFFER_LOCK:
-            MESSAGE_BUFFER.append(message_text)
-        logger.info(f"Successfully buffered 1 message from source {SOURCE_CHAT_ID}.")
+            MESSAGE_BUFFER.append(msg.text)
 
-async def aggregation_task(app: Application):
-    try:
-        await app.bot.send_message(TARGET_CHAT_ID, "✅ Final Aggregator Bot (v10) is LIVE. Aggregation task started.")
-    except TelegramError as e:
-        logger.warning(f"Could not send startup message from aggregation_task: {e}")
-
+async def aggregation_task(app: ApplicationBuilder):
     while True:
-        try:
-            await asyncio.sleep(AGGREGATION_INTERVAL_SECONDS)
-            
-            alerts_to_process = []
-            async with BUFFER_LOCK:
-                if MESSAGE_BUFFER:
-                    alerts_to_process.extend(MESSAGE_BUFFER)
-                    MESSAGE_BUFFER.clear()
+        await asyncio.sleep(AGGREGATION_INTERVAL)
+        async with BUFFER_LOCK:
+            if not MESSAGE_BUFFER:
+                continue
+            to_process = list(MESSAGE_BUFFER)
+            MESSAGE_BUFFER.clear()
 
-            if alerts_to_process:
-                logger.info(f"Processing {len(alerts_to_process)} alerts from buffer.")
-                summary_message = summarize_alerts(alerts_to_process)
-                try:
-                    await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=summary_message, parse_mode="Markdown")
-                    logger.info(f"Summary sent to {TARGET_CHAT_ID} successfully.")
-                except TelegramError as e:
-                    logger.error(f"Failed to send summary message: {e}")
-            else:
-                logger.info("Buffer is empty. Nothing to send.")
-        except Exception as e:
-            logger.critical(f"!!!!!! UNEXPECTED ERROR IN AGGREGATION TASK: {e} !!!!!!", exc_info=True)
+        summary = process_alerts(to_process)
+        if summary:
+            try:
+                await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
+            except TelegramError as e:
+                logger.error(f"Send failed: {e}")
 
-
-async def post_start(app: Application):
+async def post_init(app):
     asyncio.create_task(aggregation_task(app))
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"Update {update} caused error {context.error}", exc_info=True)
-
-# =========================
-# MAIN
-# =========================
 def main():
-    logger.info("🚀 Starting Final Aggregator Bot (v10)...")
-    
-    while True:
-        try:
-            app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_start).build()
-            
-            app.add_handler(MessageHandler(filters.ALL, message_handler))
-            app.add_error_handler(error_handler)
-            
-            logger.info("Bot started, polling for updates...")
-            app.run_polling()
-
-        except TelegramError as e:
-            if "Conflict" in str(e):
-                logger.warning("Conflict detected. Another bot instance is running. Waiting 30 seconds before retrying...")
-                time.sleep(30)
-            else:
-                logger.critical(f"A critical Telegram error occurred: {e}", exc_info=True)
-                logger.info("Restarting after a delay...")
-                time.sleep(30)
-        except Exception as e:
-            logger.critical(f"An unexpected non-Telegram error occurred in main loop: {e}", exc_info=True)
-            logger.info("Restarting after a delay...")
-            time.sleep(30)
-
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
+    logger.info("Bot is active and filtering for > 1Cr alerts...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
