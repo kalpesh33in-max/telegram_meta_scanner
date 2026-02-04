@@ -20,7 +20,7 @@ try:
     BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
     SOURCE_CHAT_ID = int(os.environ["SOURCE_CHAT_ID"])
     TARGET_CHAT_ID = int(os.environ["TARGET_CHAT_ID"])
-    # Set to 5-10 seconds for "Fast" updates
+    # Fast interval: 5 seconds
     AGGREGATION_INTERVAL = int(os.getenv("AGGREGATION_INTERVAL", 5))
 except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
@@ -30,29 +30,38 @@ MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
 # =========================
-# EXTRACTION LOGIC
+# UTILITIES (Logic Changes)
 # =========================
 def get_moneyness(symbol, fut_price):
+    """Calculates ITM, ATM, or OTM."""
     try:
-        strike_match = re.search(r"(\d{5,7})", symbol)
+        strike_match = re.search(r"(\d{5,6})", symbol)
         if not strike_match: return ""
         strike = float(strike_match.group(1))
         opt_type = "CE" if "CE" in symbol else "PE"
+        
+        # ATM within 0.15% band
         if abs(strike - fut_price) <= (fut_price * 0.0015): return "ATM"
         if opt_type == "CE":
             return "ITM" if strike < fut_price else "OTM"
         return "ITM" if strike > fut_price else "OTM"
     except: return ""
 
-def process_alerts(alerts):
+def identify_participant(text):
+    """Identifies the action type."""
+    t = text.upper()
+    if "SHORT COVERING" in t: return "SHORT COVERING ↗️"
+    if "LONG UNWINDING" in t: return "UNWINDING ⤵️"
+    if "WRITER" in t or "SHORT BUILDUP" in t: return "WRITER ✍️"
+    if "BUYER" in t or "LONG BUILDUP" in t: return "BUYER 🔵"
+    return "ACTION"
+
+def summarize_alerts(alerts):
     passed = []
-    # Patterns matching your GDFL_RAW_ALERTS format
-    p_act = re.compile(r"🚨 (.*?)\n")
-    p_sym = re.compile(r"Symbol:\n(.*?)\n")
-    p_lot = re.compile(r"LOTS:\s*(\d+)")
-    p_pr = re.compile(r"PRICE:\s*([\d\.]+)")
-    p_fut = re.compile(r"FUTURE PRICE:\s*([\d\.]+)")
+    p_sym = re.compile(r"Symbol: (.*?)\n")
     p_oi = re.compile(r"OI CHANGE\s+:\s*([+-]?[0-9,]+)")
+    p_pr = re.compile(r"PRICE:\s*([\d\.]+)")
+    p_fut = re.compile(r"FUT PRICE:\s*([\d\.]+)")
 
     for alert in alerts:
         try:
@@ -68,15 +77,13 @@ def process_alerts(alerts):
             if turnover < 10000000: continue
 
             turnover_cr = turnover / 10000000
-            action = p_act.search(alert).group(1).strip() if p_act.search(alert) else "SIGNAL"
-            lots = p_lot.search(alert).group(1) if p_lot.search(alert) else "N/A"
+            action = identify_participant(alert)
             money = f"| **{get_moneyness(symbol, float(f_m.group(1)))}**" if f_m else ""
 
             passed.append(
                 f"🏷 **{symbol}**\n"
                 f"⚡ **{action}** {money}\n"
                 f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
-                f"📦 **Lots:** {lots} | **OI Chg:** {oi_val:,}\n"
                 f"📊 Price: {price}"
             )
         except: continue
@@ -98,45 +105,29 @@ async def aggregation_task(app):
             if not MESSAGE_BUFFER: continue
             batch = list(MESSAGE_BUFFER); MESSAGE_BUFFER.clear()
         
-        summary = process_alerts(batch)
+        summary = summarize_alerts(batch)
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
             except: pass
 
 async def post_init(app):
-    """This runs the MOMENT the bot connects to Telegram."""
-    # 1. Send the Start Message immediately
-    try:
-        await app.bot.send_message(
-            chat_id=TARGET_CHAT_ID, 
-            text="🚀 **Scanner is Start**\n✅ Monitoring for > 1 Cr Alerts",
-            parse_mode="Markdown"
-        )
-        logger.info("Startup alert sent to Telegram.")
-    except Exception as e:
-        logger.error(f"Could not send startup message: {e}")
-    
-    # 2. Start the background monitoring task
     asyncio.create_task(aggregation_task(app))
 
 # =========================
-# MAIN LOOP
+# MAIN (With Conflict Fix)
 # =========================
 if __name__ == "__main__":
     while True:
         try:
-            # Building the application with the startup message in post_init
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
             app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
-            
-            logger.info("Starting Polling...")
-            # drop_pending_updates=True prevents the bot from crashing on old data
-            app.run_polling(drop_pending_updates=True) 
-            
+            logger.info("Bot is starting polling...")
+            app.run_polling()
         except Conflict:
-            logger.warning("Conflict detected (Old instance running). Waiting 10s...")
-            time.sleep(10)
+            logger.warning("Conflict: Another instance is running. Waiting 15s...")
+            time.sleep(15)
         except Exception as e:
             logger.error(f"Error: {e}")
             time.sleep(5)
+
