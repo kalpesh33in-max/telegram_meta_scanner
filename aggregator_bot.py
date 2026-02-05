@@ -39,29 +39,22 @@ def get_lot_size(symbol):
     if "HDFCBANK" in s: return 550
     if "ICICIBANK" in s: return 700
     if "NIFTY" in s and "BANK" not in s: return 75
-    return 1 # Fallback to prevent division by zero
+    return 1 
 
 def get_moneyness(symbol, fut_price):
     """Calculates ITM, ATM, or OTM for Options."""
     try:
         strike_match = re.search(r"(\d{5,6})", symbol)
         if not strike_match: return ""
-        
         strike = float(strike_match.group(1))
         opt_type = "CE" if "CE" in symbol else "PE"
-        
-        # ATM within 0.15% band
-        if abs(strike - fut_price) <= (fut_price * 0.0015): 
-            return "ATM"
-        
+        if abs(strike - fut_price) <= (fut_price * 0.0015): return "ATM"
         if opt_type == "CE":
             return "ITM" if strike < fut_price else "OTM"
         return "ITM" if strike > fut_price else "OTM"
-    except: 
-        return ""
+    except: return ""
 
 def identify_participant(text):
-    """Identifies the action type."""
     t = text.upper()
     if "SHORT COVERING" in t: return "SHORT COVERING ↗️"
     if "LONG UNWINDING" in t: return "UNWINDING ⤵️"
@@ -78,35 +71,29 @@ def summarize_alerts(alerts):
 
     for alert in alerts:
         try:
-            s_m = p_sym.search(alert)
-            oi_m = p_oi.search(alert)
-            pr_m = p_pr.search(alert)
-            f_m = p_fut.search(alert)
-
+            s_m, oi_m, pr_m, f_m = p_sym.search(alert), p_oi.search(alert), p_pr.search(alert), p_fut.search(alert)
             if not (s_m and oi_m and pr_m): continue
 
             symbol = s_m.group(1).strip()
             price = float(pr_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
             lot_size = get_lot_size(symbol)
+            num_lots = oi_val / lot_size
             
-            # --- TURNOVER LOGIC ---
-            # Future logic: 1 Lot = 100,000 Turnover
+            # --- CUSTOM TURNOVER LOGIC ---
             if "-I" in symbol or "FUT" in symbol.upper():
-                num_lots = oi_val / lot_size
+                # Future: 1 Lot = 100,000 Turnover (Ignoring Price)
                 turnover = num_lots * 100000 
             else:
-                # Option logic: Price * OI
+                # Option: Price * Qty (OI Value)
                 turnover = oi_val * price
 
-            # --- 1 CRORE FILTER (₹10,000,000) ---
+            # --- 1 CRORE FILTER ---
             if turnover < 10000000: continue
 
             turnover_cr = turnover / 10000000
-            lots_display = int(oi_val / lot_size)
             action = identify_participant(alert)
             
-            # Moneyness and Future Price Display
             money_tag = ""
             fut_display = ""
             if f_m:
@@ -120,11 +107,11 @@ def summarize_alerts(alerts):
                 f"🏷 **{symbol}**\n"
                 f"⚡ **{action}**{money_tag}\n"
                 f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
-                f"📦 Lots: {lots_display} (Qty: {oi_val})\n"
+                f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
                 f"📊 Price: {price}{fut_display}"
             )
         except Exception as e:
-            logger.error(f"Error parsing alert: {e}")
+            logger.error(f"Error: {e}")
             continue
             
     return "\n\n---\n\n".join(passed)
@@ -144,20 +131,15 @@ async def aggregation_task(app):
         async with BUFFER_LOCK:
             if not MESSAGE_BUFFER: continue
             batch = list(MESSAGE_BUFFER); MESSAGE_BUFFER.clear()
-        
         summary = summarize_alerts(batch)
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
-            except Exception as e:
-                logger.error(f"Telegram send error: {e}")
+            except: pass
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
 
-# =========================
-# MAIN ENTRY
-# =========================
 if __name__ == "__main__":
     while True:
         try:
@@ -166,8 +148,6 @@ if __name__ == "__main__":
             logger.info("Bot is starting polling...")
             app.run_polling()
         except Conflict:
-            logger.warning("Conflict: Another instance is running. Waiting 15s...")
             time.sleep(15)
         except Exception as e:
-            logger.error(f"Fatal error: {e}")
             time.sleep(5)
