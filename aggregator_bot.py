@@ -29,24 +29,21 @@ MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
 # =========================
-# UTILITIES
+# UTILITIES & LOGIC
 # =========================
 
 def get_lot_size(symbol):
-    """Returns lot size based on symbol name."""
-    if "BANKNIFTY" in symbol.upper():
-        return 30
-    if "HDFCBANK" in symbol.upper():
-        return 550
-    return 1 # Default fallback
+    """Returns accurate lot sizes for Feb 2026."""
+    s = symbol.upper()
+    if "BANKNIFTY" in s: return 30
+    if "HDFCBANK" in s: return 550
+    if "ICICIBANK" in s: return 700
+    if "NIFTY" in s and "BANK" not in s: return 75
+    return 1 # Fallback to prevent division by zero
 
 def get_moneyness(symbol, fut_price):
     """Calculates ITM, ATM, or OTM for Options."""
     try:
-        # Check if it's an option (contains CE or PE)
-        if not ("CE" in symbol or "PE" in symbol):
-            return ""
-            
         strike_match = re.search(r"(\d{5,6})", symbol)
         if not strike_match: return ""
         
@@ -55,18 +52,16 @@ def get_moneyness(symbol, fut_price):
         
         # ATM within 0.15% band
         if abs(strike - fut_price) <= (fut_price * 0.0015): 
-            return " | ATM"
+            return "ATM"
         
         if opt_type == "CE":
-            res = "ITM" if strike < fut_price else "OTM"
-        else:
-            res = "ITM" if strike > fut_price else "OTM"
-            
-        return f" | {res}"
+            return "ITM" if strike < fut_price else "OTM"
+        return "ITM" if strike > fut_price else "OTM"
     except: 
         return ""
 
 def identify_participant(text):
+    """Identifies the action type."""
     t = text.upper()
     if "SHORT COVERING" in t: return "SHORT COVERING ↗️"
     if "LONG UNWINDING" in t: return "UNWINDING ⤵️"
@@ -76,44 +71,57 @@ def identify_participant(text):
 
 def summarize_alerts(alerts):
     passed = []
-    p_sym = re.compile(r"Symbol: (.*?)\n")
-    p_oi = re.compile(r"OI CHANGE\s+:\s*([+-]?[0-9,]+)")
-    p_pr = re.compile(r"PRICE:\s*([\d\.]+)")
-    p_fut = re.compile(r"FUT PRICE:\s*([\d\.]+)")
+    p_sym = re.compile(r"Symbol\s*:\s*(.*?)\n", re.IGNORECASE)
+    p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
+    p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
+    p_fut = re.compile(r"FUT PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
 
     for alert in alerts:
         try:
-            s_m, oi_m, pr_m, f_m = p_sym.search(alert), p_oi.search(alert), p_pr.search(alert), p_fut.search(alert)
+            s_m = p_sym.search(alert)
+            oi_m = p_oi.search(alert)
+            pr_m = p_pr.search(alert)
+            f_m = p_fut.search(alert)
+
             if not (s_m and oi_m and pr_m): continue
 
             symbol = s_m.group(1).strip()
             price = float(pr_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
+            lot_size = get_lot_size(symbol)
             
-            # Calculations
-            turnover = oi_val * price
-            if turnover < 10000000: continue # 1 Crore Filter
+            # --- TURNOVER LOGIC ---
+            # Future logic: 1 Lot = 100,000 Turnover
+            if "-I" in symbol or "FUT" in symbol.upper():
+                num_lots = oi_val / lot_size
+                turnover = num_lots * 100000 
+            else:
+                # Option logic: Price * OI
+                turnover = oi_val * price
+
+            # --- 1 CRORE FILTER (₹10,000,000) ---
+            if turnover < 10000000: continue
 
             turnover_cr = turnover / 10000000
-            lot_size = get_lot_size(symbol)
-            lots = oi_val / lot_size
-            
+            lots_display = int(oi_val / lot_size)
             action = identify_participant(alert)
             
-            # Moneyness logic (only if Fut Price exists)
+            # Moneyness and Future Price Display
             money_tag = ""
             fut_display = ""
             if f_m:
                 f_price = float(f_m.group(1))
-                money_tag = get_moneyness(symbol, f_price)
-                fut_display = f"🔹 Fut: {f_price}"
+                if "CE" in symbol or "PE" in symbol:
+                    m_status = get_moneyness(symbol, f_price)
+                    money_tag = f" | **{m_status}**" if m_status else ""
+                fut_display = f"\n🔹 **Fut Price: {f_price}**"
 
             passed.append(
                 f"🏷 **{symbol}**\n"
                 f"⚡ **{action}**{money_tag}\n"
                 f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
-                f"📦 Lots: {int(lots)} (Qty: {oi_val})\n"
-                f"📊 Price: {price} {fut_display}"
+                f"📦 Lots: {lots_display} (Qty: {oi_val})\n"
+                f"📊 Price: {price}{fut_display}"
             )
         except Exception as e:
             logger.error(f"Error parsing alert: {e}")
@@ -142,11 +150,14 @@ async def aggregation_task(app):
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
             except Exception as e:
-                logger.error(f"Send error: {e}")
+                logger.error(f"Telegram send error: {e}")
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
 
+# =========================
+# MAIN ENTRY
+# =========================
 if __name__ == "__main__":
     while True:
         try:
@@ -155,8 +166,8 @@ if __name__ == "__main__":
             logger.info("Bot is starting polling...")
             app.run_polling()
         except Conflict:
-            logger.warning("Conflict detected. Waiting 15s...")
+            logger.warning("Conflict: Another instance is running. Waiting 15s...")
             time.sleep(15)
         except Exception as e:
-            logger.error(f"Runtime error: {e}")
+            logger.error(f"Fatal error: {e}")
             time.sleep(5)
