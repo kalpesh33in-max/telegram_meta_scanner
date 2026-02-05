@@ -5,7 +5,7 @@ import re
 import time
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from telegram.error import Conflict, TelegramError
+from telegram.error import Conflict
 
 # =========================
 # LOGGING SETUP
@@ -20,7 +20,6 @@ try:
     BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
     SOURCE_CHAT_ID = int(os.environ["SOURCE_CHAT_ID"])
     TARGET_CHAT_ID = int(os.environ["TARGET_CHAT_ID"])
-    # Fast interval: 5 seconds
     AGGREGATION_INTERVAL = int(os.getenv("AGGREGATION_INTERVAL", 5))
 except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
@@ -30,25 +29,44 @@ MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
 # =========================
-# UTILITIES (Logic Changes)
+# UTILITIES
 # =========================
+
+def get_lot_size(symbol):
+    """Returns lot size based on symbol name."""
+    if "BANKNIFTY" in symbol.upper():
+        return 30
+    if "HDFCBANK" in symbol.upper():
+        return 550
+    return 1 # Default fallback
+
 def get_moneyness(symbol, fut_price):
-    """Calculates ITM, ATM, or OTM."""
+    """Calculates ITM, ATM, or OTM for Options."""
     try:
+        # Check if it's an option (contains CE or PE)
+        if not ("CE" in symbol or "PE" in symbol):
+            return ""
+            
         strike_match = re.search(r"(\d{5,6})", symbol)
         if not strike_match: return ""
+        
         strike = float(strike_match.group(1))
         opt_type = "CE" if "CE" in symbol else "PE"
         
         # ATM within 0.15% band
-        if abs(strike - fut_price) <= (fut_price * 0.0015): return "ATM"
+        if abs(strike - fut_price) <= (fut_price * 0.0015): 
+            return " | ATM"
+        
         if opt_type == "CE":
-            return "ITM" if strike < fut_price else "OTM"
-        return "ITM" if strike > fut_price else "OTM"
-    except: return ""
+            res = "ITM" if strike < fut_price else "OTM"
+        else:
+            res = "ITM" if strike > fut_price else "OTM"
+            
+        return f" | {res}"
+    except: 
+        return ""
 
 def identify_participant(text):
-    """Identifies the action type."""
     t = text.upper()
     if "SHORT COVERING" in t: return "SHORT COVERING ↗️"
     if "LONG UNWINDING" in t: return "UNWINDING ⤵️"
@@ -70,23 +88,37 @@ def summarize_alerts(alerts):
 
             symbol = s_m.group(1).strip()
             price = float(pr_m.group(1))
-            oi_val = int(oi_m.group(1).replace(",", ""))
-            turnover = abs(oi_val * price)
-
-            # --- 1 CRORE FILTER ---
-            if turnover < 10000000: continue
+            oi_val = abs(int(oi_m.group(1).replace(",", "")))
+            
+            # Calculations
+            turnover = oi_val * price
+            if turnover < 10000000: continue # 1 Crore Filter
 
             turnover_cr = turnover / 10000000
+            lot_size = get_lot_size(symbol)
+            lots = oi_val / lot_size
+            
             action = identify_participant(alert)
-            money = f"| **{get_moneyness(symbol, float(f_m.group(1)))}**" if f_m else ""
+            
+            # Moneyness logic (only if Fut Price exists)
+            money_tag = ""
+            fut_display = ""
+            if f_m:
+                f_price = float(f_m.group(1))
+                money_tag = get_moneyness(symbol, f_price)
+                fut_display = f"🔹 Fut: {f_price}"
 
             passed.append(
                 f"🏷 **{symbol}**\n"
-                f"⚡ **{action}** {money}\n"
+                f"⚡ **{action}**{money_tag}\n"
                 f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
-                f"📊 Price: {price}"
+                f"📦 Lots: {int(lots)} (Qty: {oi_val})\n"
+                f"📊 Price: {price} {fut_display}"
             )
-        except: continue
+        except Exception as e:
+            logger.error(f"Error parsing alert: {e}")
+            continue
+            
     return "\n\n---\n\n".join(passed)
 
 # =========================
@@ -109,14 +141,12 @@ async def aggregation_task(app):
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
-            except: pass
+            except Exception as e:
+                logger.error(f"Send error: {e}")
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
 
-# =========================
-# MAIN (With Conflict Fix)
-# =========================
 if __name__ == "__main__":
     while True:
         try:
@@ -125,9 +155,8 @@ if __name__ == "__main__":
             logger.info("Bot is starting polling...")
             app.run_polling()
         except Conflict:
-            logger.warning("Conflict: Another instance is running. Waiting 15s...")
+            logger.warning("Conflict detected. Waiting 15s...")
             time.sleep(15)
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Runtime error: {e}")
             time.sleep(5)
-
