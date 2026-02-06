@@ -31,7 +31,7 @@ active_watch = {"symbol": None, "alert_price": 0, "timestamp": 0, "type": None}
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
-# UPDATED: Initialize without consumer_secret for v2.0+
+# UPDATED: Initialize for v2.0+ (removed consumer_secret)
 neo = NeoAPI(consumer_key=NEO_CONS_KEY, environment='prod')
 
 # =========================
@@ -39,7 +39,9 @@ neo = NeoAPI(consumer_key=NEO_CONS_KEY, environment='prod')
 # =========================
 
 async def get_live_price(symbol):
+    """Fetches real-time LTP from Kotak Neo."""
     try:
+        # Segment is typically 'nse_fo' for options
         quote = neo.quotes(symbols=[{'symbol': symbol, 'exchange': 'NSE'}])
         return float(quote['data'][0]['last_price'])
     except Exception as e:
@@ -47,45 +49,54 @@ async def get_live_price(symbol):
         return None
 
 def log_trade(action, symbol, price, pnl=0):
+    """Saves paper trade results to a local CSV file."""
     with open('trade_log.csv', 'a', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([time.ctime(), action, symbol, price, pnl])
 
 async def trading_engine():
+    """Logic for watching price triggers and managing trades."""
     global active_trade, active_watch
     while True:
-        await asyncio.sleep(1)
+        await asyncio.sleep(1) # Check price every second
         
+        # MONITOR WATCHLIST (10-Minute Window)
         if active_watch["symbol"]:
-            if time.time() - active_watch["timestamp"] > 600:
+            if time.time() - active_watch["timestamp"] > 600: #
+                logger.info(f"Watch window expired for {active_watch['symbol']}")
                 active_watch["symbol"] = None
                 continue
             
             ltp = await get_live_price(active_watch["symbol"])
             if ltp:
+                # ENTRY TRIGGER: +/- 20 points from Alert
                 if abs(ltp - active_watch["alert_price"]) >= 20:
+                    # REVERSAL: Close opposite trade
                     if active_trade["symbol"] and active_trade["type"] != active_watch["type"]:
                         exit_price = await get_live_price(active_trade["symbol"])
                         pnl = exit_price - active_trade["entry"]
                         log_trade("EXIT (REVERSAL)", active_trade["symbol"], exit_price, pnl)
                     
+                    # ENTER NEW TRADE
                     active_trade = {"symbol": active_watch["symbol"], "entry": ltp, "type": active_watch["type"], "qty": 30}
                     active_watch["symbol"] = None
                     log_trade("ENTER", active_trade["symbol"], ltp)
 
+        # MONITOR ACTIVE POSITION (40-Point Target/SL)
         if active_trade["symbol"]:
             ltp = await get_live_price(active_trade["symbol"])
             if ltp:
                 pnl = ltp - active_trade["entry"]
-                if pnl >= 40 or pnl <= -40:
+                if pnl >= 40 or pnl <= -40: #
                     log_trade("EXIT (TGT/SL)", active_trade["symbol"], ltp, pnl)
                     active_trade = {"symbol": None, "entry": 0, "type": None}
 
 # =========================
-# SCANNER UTILITIES
+# SCANNER LOGIC
 # =========================
 
 def get_lot_size(symbol):
+    """2026 Lot Sizes."""
     s = symbol.upper()
     if "BANKNIFTY" in s: return 30
     if "HDFCBANK" in s: return 550
@@ -117,6 +128,7 @@ def summarize_alerts(alerts):
             price = float(pr_m.group(1))
             action = identify_participant(alert)
             
+            # TRADE TRIGGER: BankNifty only, no Unwinding/Short Covering
             if "BANKNIFTY" in symbol and ("CE" in symbol or "PE" in symbol):
                 if any(x in action for x in ["WRITER", "BUYER", "ACTION"]):
                     active_watch = {
@@ -126,11 +138,12 @@ def summarize_alerts(alerts):
                         "type": "CE" if "CE" in symbol else "PE"
                     }
             
+            # SCANNER AGGREGATION
             oi_val = abs(int(oi_m.group(1).replace(",", ""))) if oi_m else 0
             lot_size = get_lot_size(symbol)
             turnover = (oi_val / lot_size * 100000) if "-I" in symbol else (oi_val * price)
             
-            if turnover >= 10000000:
+            if turnover >= 10000000: # 1 Crore Threshold
                 turnover_cr = turnover / 10000000
                 passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n💰 **₹{turnover_cr:.2f} Cr**\n📊 Price: {price}")
         except: continue
@@ -147,15 +160,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             MESSAGE_BUFFER.append(m.text)
 
 async def post_init(app):
+    """Auto-Login for Kotak Neo."""
     try:
-        # Automatic TOTP Login
         totp_gen = pyotp.TOTP(NEO_TOTP_SEC)
         current_totp = totp_gen.now()
         
-        # New v2 login method
+        # New login sequence for v2.0+
         neo.login(password=NEO_PASS)
         neo.allow_2fa(token=current_totp)
-        logger.info("Kotak Neo v2 Login Successful.")
+        logger.info("Successfully logged into Kotak Neo.")
         
         asyncio.create_task(trading_engine())
         asyncio.create_task(aggregation_task(app))
@@ -180,6 +193,7 @@ if __name__ == "__main__":
             app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
             app.run_polling()
         except Conflict:
+            # Added wait to handle Railway redeploy overlaps
             time.sleep(15)
         except Exception as e:
             time.sleep(5)
