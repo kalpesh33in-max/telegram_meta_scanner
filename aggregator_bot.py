@@ -3,6 +3,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from telegram.error import Conflict
 
+# ================= CONFIG =================
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ AGGREGATION_INTERVAL = int(os.getenv("AGGREGATION_INTERVAL", 5))
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
-# ---------------- SCANNER LOGIC ----------------
+# ================= SCANNER LOGIC =================
 
 def get_lot_size(symbol):
     s = symbol.upper()
@@ -41,7 +42,8 @@ def summarize_alerts(alerts):
     for alert in alerts:
         try:
             s_m, pr_m, oi_m = p_sym.search(alert), p_pr.search(alert), p_oi.search(alert)
-            if not (s_m and pr_m): continue
+            if not (s_m and pr_m):
+                continue
 
             symbol = s_m.group(1).strip()
             price = float(pr_m.group(1))
@@ -53,17 +55,20 @@ def summarize_alerts(alerts):
 
             if turnover >= 10000000:
                 turnover_cr = turnover / 10000000
-                passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n💰 **₹{turnover_cr:.2f} Cr**\n📊 Price: {price}")
+                passed.append(
+                    f"🏷 **{symbol}**\n⚡ **{action}**\n💰 **₹{turnover_cr:.2f} Cr**\n📊 Price: {price}"
+                )
         except:
             continue
 
     return "\n\n---\n\n".join(passed)
 
-# ---------------- HANDLERS ----------------
+# ================= HANDLERS =================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = update.channel_post or update.message
     if m and str(m.chat.id) == str(SOURCE_CHAT_ID) and m.text:
+        logger.info(f"Message received from source: {m.text}")
         async with BUFFER_LOCK:
             MESSAGE_BUFFER.append(m.text)
 
@@ -80,8 +85,9 @@ async def aggregation_task(app):
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
-            except:
-                pass
+                logger.info("Summary sent to target channel.")
+            except Exception as e:
+                logger.error(f"Send failed: {e}")
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
@@ -93,16 +99,18 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         return
     logger.error("Exception while handling update:", exc_info=context.error)
 
-# ---------------- MAIN ----------------
+# ================= MAIN =================
 
 if __name__ == "__main__":
     while True:
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
-            # ✅ FIXED for v21
             app.add_handler(
-                MessageHandler(filters.UpdateType.CHANNEL_POST, message_handler)
+                MessageHandler(
+                    filters.ChatType.CHANNEL & filters.TEXT & (~filters.COMMAND),
+                    message_handler
+                )
             )
 
             app.add_error_handler(error_handler)
