@@ -202,7 +202,7 @@ if __name__ == "__main__":
     while True:
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-            app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
+            app.add_handler(MessageHandler(filters.ALL, message_handler))
             app.add_error_handler(error_handler)
             app.run_polling()
         except Conflict:
