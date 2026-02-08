@@ -1,6 +1,7 @@
 python-telegram-bot==21.1
-aiohttp==3.9.5
-requests==2.32.3
-pyotp==2.9.0
-kotak-neo-smartapi
-
+pytz
+websockets
+nsepython
+pandas
+requests
+aiohttp
