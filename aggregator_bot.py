@@ -187,14 +187,24 @@ async def aggregation_task(app):
             try: await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
             except: pass
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log specific conflict errors and other exceptions."""
+    if isinstance(context.error, Conflict):
+        logger.warning("Conflict error detected, likely a deployment overlap. The library will handle the retry.")
+        return
+    logger.error("Exception while handling an update:", exc_info=context.error)
+
+
 if __name__ == "__main__":
     while True:
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
             app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
+            app.add_error_handler(error_handler)
             app.run_polling()
         except Conflict:
-            # Added wait to handle Railway redeploy overlaps
+            logger.warning("Conflict on initial startup. Waiting 15s to retry...")
             time.sleep(15)
         except Exception as e:
+            logger.error(f"Critical error in main loop: {e}. Restarting in 5s.")
             time.sleep(5)
