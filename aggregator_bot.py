@@ -1,6 +1,6 @@
 import os, asyncio, logging, re, time, csv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, ChannelPostHandler, filters
 from telegram.error import Conflict
 
 # =========================
@@ -73,11 +73,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m and str(m.chat.id) == str(SOURCE_CHAT_ID) and m.text:
         async with BUFFER_LOCK:
             MESSAGE_BUFFER.append(m.text)
-            logger.info(f"Added message to buffer. Buffer size is now: {len(MESSAGE_BUFFER)}")
 
 async def aggregation_task(app):
     while True:
-        logger.info("Aggregation task running...")
         await asyncio.sleep(AGGREGATION_INTERVAL)
         async with BUFFER_LOCK:
             if not MESSAGE_BUFFER:
@@ -85,9 +83,7 @@ async def aggregation_task(app):
             batch = list(MESSAGE_BUFFER)
             MESSAGE_BUFFER.clear()
 
-        logger.info(f"Processing batch of {len(batch)} messages.")
         summary = summarize_alerts(batch)
-        logger.info(f"Summary generated: '{summary}'")
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
@@ -113,10 +109,7 @@ if __name__ == "__main__":
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
-            # v21 FIX for channel messages
-            app.add_handler(
-                MessageHandler(filters.ChatType.CHANNEL & filters.TEXT & (~filters.COMMAND), message_handler)
-            )
+            app.add_handler(ChannelPostHandler(filters.TEXT & (~filters.COMMAND), message_handler))
 
             app.add_error_handler(error_handler)
             app.run_polling()
