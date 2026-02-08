@@ -38,10 +38,13 @@ def summarize_alerts(alerts):
     p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
     p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
 
+    logger.info(f"Summarizing {len(alerts)} alerts.")
     for alert in alerts:
         try:
             s_m, pr_m, oi_m = p_sym.search(alert), p_pr.search(alert), p_oi.search(alert)
-            if not (s_m and pr_m): continue
+            if not (s_m and pr_m):
+                logger.warning(f"Skipping alert due to missing symbol or price: {alert[:100]}")
+                continue
 
             symbol = s_m.group(1).strip()
             price = float(pr_m.group(1))
@@ -51,10 +54,16 @@ def summarize_alerts(alerts):
             lot_size = get_lot_size(symbol)
             turnover = (oi_val / lot_size * 100000) if "-I" in symbol else (oi_val * price)
 
+            logger.info(f"Alert:'{symbol}' | OI Val: {oi_val} | Price: {price} | Calculated Turnover: {turnover}")
+
             if turnover >= 10000000:
+                logger.info(f"PASSED: '{symbol}' with turnover {turnover}")
                 turnover_cr = turnover / 10000000
                 passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n💰 **₹{turnover_cr:.2f} Cr**\n📊 Price: {price}")
-        except:
+            else:
+                logger.info(f"FILTERED: '{symbol}' with turnover {turnover}")
+        except Exception as e:
+            logger.error(f"Error processing alert: {e} | Alert: {alert[:100]}")
             continue
 
     return "\n\n---\n\n".join(passed)
@@ -66,6 +75,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m and str(m.chat.id) == str(SOURCE_CHAT_ID) and m.text:
         async with BUFFER_LOCK:
             MESSAGE_BUFFER.append(m.text)
+            logger.info(f"Added message to buffer. Buffer size is now: {len(MESSAGE_BUFFER)}")
 
 async def aggregation_task(app):
     while True:
@@ -76,12 +86,15 @@ async def aggregation_task(app):
             batch = list(MESSAGE_BUFFER)
             MESSAGE_BUFFER.clear()
 
+        logger.info(f"Processing batch of {len(batch)} messages.")
         summary = summarize_alerts(batch)
+        logger.info(f"Summary generated: '{summary}'")
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
-            except:
-                pass
+                logger.info("Successfully sent summary to target channel.")
+            except Exception as e:
+                logger.error(f"Failed to send summary: {e}")
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
@@ -102,7 +115,7 @@ if __name__ == "__main__":
 
             # ✅ FIXED for v21
             app.add_handler(
-                MessageHandler(filters.ChatType.CHANNEL & filters.TEXT & (~filters.COMMAND), message_handler)
+                MessageHandler(filters.UpdateType.CHANNEL_POST & filters.TEXT & (~filters.COMMAND), message_handler)
             )
 
             app.add_error_handler(error_handler)
