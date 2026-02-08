@@ -6,4 +6,4 @@ pandas
 requests
 aiohttp
 pyotp
-neo-api-client
+neoapi-python
