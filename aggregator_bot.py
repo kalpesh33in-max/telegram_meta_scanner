@@ -1,5 +1,5 @@
 import os, asyncio, logging, re, time, csv
-import pyotp
+# import pyotp
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from telegram.error import Conflict
