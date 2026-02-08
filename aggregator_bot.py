@@ -165,15 +165,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     """Auto-Login for Kotak Neo."""
     try:
-        totp_gen = pyotp.TOTP(NEO_TOTP_SEC)
-        current_totp = totp_gen.now()
+        # totp_gen = pyotp.TOTP(NEO_TOTP_SEC)
+        # current_totp = totp_gen.now()
         
-        # New login sequence for v2.0+
-        neo.login(password=NEO_PASS)
-        neo.allow_2fa(token=current_totp)
-        logger.info("Successfully logged into Kotak Neo.")
+        # # New login sequence for v2.0+
+        # neo.login(password=NEO_PASS)
+        # neo.allow_2fa(token=current_totp)
+        # logger.info("Successfully logged into Kotak Neo.")
         
-        asyncio.create_task(trading_engine())
+        # asyncio.create_task(trading_engine())
+        logger.info("Kotak Neo login is temporarily disabled for debugging.")
         asyncio.create_task(aggregation_task(app))
     except Exception as e:
         logger.error(f"Setup Failed: {e}")
