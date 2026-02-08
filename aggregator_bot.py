@@ -1,7 +1,7 @@
 
 import os, asyncio, logging, re, time, csv, pyotp
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, ChannelPostHandler, filters
 from telegram.error import Conflict
 from neo_api_client import NeoAPI 
 
@@ -155,7 +155,6 @@ def summarize_alerts(alerts):
 # =========================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"DEBUG: Full update object received: {update.to_dict()}")
     m = update.channel_post or update.message
     if m and str(m.chat.id) == str(SOURCE_CHAT_ID) and m.text:
         async with BUFFER_LOCK:
@@ -201,7 +200,7 @@ if __name__ == "__main__":
     while True:
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-            app.add_handler(MessageHandler(filters.ALL, message_handler))
+            app.add_handler(ChannelPostHandler(filters.TEXT & (~filters.COMMAND), message_handler))
             app.add_error_handler(error_handler)
             app.run_polling()
         except Conflict:
