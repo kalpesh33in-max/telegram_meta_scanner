@@ -156,6 +156,8 @@ def summarize_alerts(alerts):
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = update.channel_post or update.message
+    if m:
+        logger.info(f"DEBUG: Message received in chat ID: {m.chat.id}")
     if m and str(m.chat.id) == str(SOURCE_CHAT_ID) and m.text:
         async with BUFFER_LOCK:
             MESSAGE_BUFFER.append(m.text)
