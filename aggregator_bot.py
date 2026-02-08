@@ -1,8 +1,11 @@
 import os, asyncio, logging, re, time, csv
+import pyotp
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from telegram.error import Conflict
+from neo_api_client import NeoAPI
 
+# ================= CONFIG =================
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -11,18 +14,21 @@ SOURCE_CHAT_ID = int(os.environ["SOURCE_CHAT_ID"])
 TARGET_CHAT_ID = int(os.environ["TARGET_CHAT_ID"])
 AGGREGATION_INTERVAL = int(os.getenv("AGGREGATION_INTERVAL", 5))
 
+# Broker credentials
+NEO_CONSUMER_KEY = os.getenv("NEO_CONSUMER_KEY")
+NEO_ID = os.getenv("NEO_ID")
+NEO_PASSWORD = os.getenv("NEO_PASSWORD")
+NEO_TOTP_SECRET = os.getenv("NEO_TOTP_SECRET")
+
+neo = None  # will initialize after login
+
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
-# ---------------- SCANNER LOGIC ----------------
+active_trade = {"symbol": None, "entry": 0, "type": None, "qty": 30}
+active_watch = {"symbol": None, "alert_price": 0, "timestamp": 0, "type": None}
 
-def get_lot_size(symbol):
-    s = symbol.upper()
-    if "BANKNIFTY" in s: return 30
-    if "HDFCBANK" in s: return 550
-    if "ICICIBANK" in s: return 700
-    if "NIFTY" in s and "BANK" not in s: return 75
-    return 1
+# ================= SCANNER =================
 
 def identify_participant(text):
     t = text.upper()
@@ -48,18 +54,60 @@ def summarize_alerts(alerts):
             action = identify_participant(alert)
 
             oi_val = abs(int(oi_m.group(1).replace(",", ""))) if oi_m else 0
-            lot_size = get_lot_size(symbol)
-            turnover = (oi_val / lot_size * 100000) if "-I" in symbol else (oi_val * price)
+            turnover = oi_val * price
 
             if turnover >= 10000000:
-                turnover_cr = turnover / 10000000
-                passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n💰 **₹{turnover_cr:.2f} Cr**\n📊 Price: {price}")
+                passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n💰 **₹{turnover/1e7:.2f} Cr**\n📊 Price: {price}")
+
+                active_watch.update({
+                    "symbol": symbol,
+                    "alert_price": price,
+                    "timestamp": time.time(),
+                    "type": "CE" if "CE" in symbol else "PE"
+                })
         except:
             continue
 
     return "\n\n---\n\n".join(passed)
 
-# ---------------- HANDLERS ----------------
+# ================= BROKER LTP =================
+
+async def get_live_price(symbol):
+    try:
+        quote = neo.quotes(symbols=[{'symbol': symbol, 'exchange': 'NSE'}])
+        return float(quote['data'][0]['last_price'])
+    except Exception as e:
+        logger.error(f"LTP Error: {e}")
+        return None
+
+def log_trade(action, symbol, price, pnl=0):
+    with open("paper_trade_log.csv", "a", newline="") as f:
+        csv.writer(f).writerow([time.ctime(), action, symbol, price, pnl])
+
+# ================= PAPER ENGINE =================
+
+async def trading_engine():
+    global active_trade, active_watch
+
+    while True:
+        await asyncio.sleep(2)
+
+        if active_watch["symbol"]:
+            ltp = await get_live_price(active_watch["symbol"])
+            if ltp and abs(ltp - active_watch["alert_price"]) >= 20:
+                active_trade = {"symbol": active_watch["symbol"], "entry": ltp, "type": active_watch["type"], "qty": 30}
+                log_trade("ENTER", active_trade["symbol"], ltp)
+                active_watch["symbol"] = None
+
+        if active_trade["symbol"]:
+            ltp = await get_live_price(active_trade["symbol"])
+            if ltp:
+                pnl = ltp - active_trade["entry"]
+                if pnl >= 40 or pnl <= -40:
+                    log_trade("EXIT", active_trade["symbol"], ltp, pnl)
+                    active_trade = {"symbol": None, "entry": 0, "type": None}
+
+# ================= TELEGRAM =================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = update.channel_post or update.message
@@ -71,46 +119,34 @@ async def aggregation_task(app):
     while True:
         await asyncio.sleep(AGGREGATION_INTERVAL)
         async with BUFFER_LOCK:
-            if not MESSAGE_BUFFER:
-                continue
+            if not MESSAGE_BUFFER: continue
             batch = list(MESSAGE_BUFFER)
             MESSAGE_BUFFER.clear()
 
         summary = summarize_alerts(batch)
         if summary:
-            try:
-                await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
-            except:
-                pass
+            await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
 
 async def post_init(app):
+    global neo
+    neo = NeoAPI(consumer_key=NEO_CONSUMER_KEY, environment='prod')
+    totp = pyotp.TOTP(NEO_TOTP_SECRET).now()
+    neo.login(password=NEO_PASSWORD)
+    neo.allow_2fa(token=totp)
+    logger.info("Kotak Neo login successful")
+
     asyncio.create_task(aggregation_task(app))
-    logger.info("Bot started successfully.")
+    asyncio.create_task(trading_engine())
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    if isinstance(context.error, Conflict):
-        logger.warning("Conflict error detected. Retrying automatically.")
-        return
-    logger.error("Exception while handling update:", exc_info=context.error)
-
-# ---------------- MAIN ----------------
+# ================= MAIN =================
 
 if __name__ == "__main__":
     while True:
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-
-            # ✅ FIXED for v21
-            app.add_handler(
-                MessageHandler(filters.UpdateType.CHANNEL_POST, message_handler)
-            )
-
-            app.add_error_handler(error_handler)
+            app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.TEXT & (~filters.COMMAND), message_handler))
             app.run_polling()
-
         except Conflict:
-            logger.warning("Startup conflict. Waiting 15s...")
             time.sleep(15)
-        except Exception as e:
-            logger.error(f"Critical crash: {e}. Restarting in 5s.")
+        except Exception:
             time.sleep(5)
