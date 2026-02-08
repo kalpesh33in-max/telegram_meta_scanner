@@ -73,9 +73,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m and str(m.chat.id) == str(SOURCE_CHAT_ID) and m.text:
         async with BUFFER_LOCK:
             MESSAGE_BUFFER.append(m.text)
+            logger.info(f"Added message to buffer. Buffer size is now: {len(MESSAGE_BUFFER)}")
 
 async def aggregation_task(app):
     while True:
+        logger.info("Aggregation task running...")
         await asyncio.sleep(AGGREGATION_INTERVAL)
         async with BUFFER_LOCK:
             if not MESSAGE_BUFFER:
@@ -83,7 +85,9 @@ async def aggregation_task(app):
             batch = list(MESSAGE_BUFFER)
             MESSAGE_BUFFER.clear()
 
+        logger.info(f"Processing batch of {len(batch)} messages.")
         summary = summarize_alerts(batch)
+        logger.info(f"Summary generated: '{summary}'")
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
