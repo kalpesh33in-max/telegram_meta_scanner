@@ -89,9 +89,9 @@ def summarize_alerts(alerts):
                 turnover = oi_val * price
 
             # --- 1 CRORE FILTER ---
-            if turnover < 20000000: continue
+            if turnover < 10000000: continue
 
-            turnover_cr = turnover / 20000000
+            turnover_cr = turnover / 10000000
             action = identify_participant(alert)
             
             money_tag = ""
