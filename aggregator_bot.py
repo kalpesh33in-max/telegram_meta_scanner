@@ -25,6 +25,9 @@ except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
 
+OPTION_TURNOVER_THRESHOLD = 10000000  # 1 Crore
+FUTURE_TURNOVER_THRESHOLD = 30000000  # 3 Crore
+
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
@@ -41,18 +44,7 @@ def get_lot_size(symbol):
     if "NIFTY" in s and "BANK" not in s: return 75
     return 1 
 
-def get_moneyness(symbol, fut_price):
-    """Calculates ITM, ATM, or OTM for Options."""
-    try:
-        strike_match = re.search(r"(\d{5,6})", symbol)
-        if not strike_match: return ""
-        strike = float(strike_match.group(1))
-        opt_type = "CE" if "CE" in symbol else "PE"
-        if abs(strike - fut_price) <= (fut_price * 0.0015): return "ATM"
-        if opt_type == "CE":
-            return "ITM" if strike < fut_price else "OTM"
-        return "ITM" if strike > fut_price else "OTM"
-    except: return ""
+
 
 def identify_participant(text):
     t = text.upper()
@@ -88,24 +80,23 @@ def summarize_alerts(alerts):
                 # Option: Price * Qty (OI Value)
                 turnover = oi_val * price
 
-            # --- 1 CRORE FILTER ---
-            if turnover < 10000000: continue
+            # --- TURNOVER FILTER ---
+            if "-I" in symbol or "FUT" in symbol.upper():
+                if turnover < FUTURE_TURNOVER_THRESHOLD: continue
+            else:
+                if turnover < OPTION_TURNOVER_THRESHOLD: continue
 
             turnover_cr = turnover / 10000000
             action = identify_participant(alert)
             
-            money_tag = ""
             fut_display = ""
             if f_m:
                 f_price = float(f_m.group(1))
-                if "CE" in symbol or "PE" in symbol:
-                    m_status = get_moneyness(symbol, f_price)
-                    money_tag = f" | **{m_status}**" if m_status else ""
                 fut_display = f"\n🔹 **Fut Price: {f_price}**"
 
             passed.append(
                 f"🏷 **{symbol}**\n"
-                f"⚡ **{action}**{money_tag}\n"
+                f"⚡ **{action}**\n"
                 f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
                 f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
                 f"📊 Price: {price}{fut_display}"
