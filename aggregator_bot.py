@@ -25,8 +25,9 @@ except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
 
-# Global Threshold set to 1.5 Crore
-GLOBAL_TURNOVER_THRESHOLD = 15000000 
+# Thresholds
+OPTION_TURNOVER_THRESHOLD = 10000000  # 1 Crore 
+FUTURE_TURNOVER_THRESHOLD = 30000000  # 3 Crore 
 
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
@@ -72,20 +73,24 @@ def summarize_alerts(alerts):
             
             action = identify_participant(alert)
 
-            # --- NEW TURNOVER LOGIC ---
+            # --- UPDATED TURNOVER CALCULATION ---
             # If Writer or Short Covering, use 50k per lot (Option and Future)
             if action in ["SHORT COVERING ↗️", "WRITER ✍️"]:
                 turnover = num_lots * 50000
             else:
                 # Standard logic for Buyer/Unwinding
                 if "-I" in symbol or "FUT" in symbol.upper():
+                    # Future: Standard 1 Lot = 100k
                     turnover = num_lots * 100000 
                 else:
+                    # Option: Price * Qty
                     turnover = oi_val * price
 
-            # --- UNIFIED TURNOVER FILTER (1.5 Cr) ---
-            if turnover < GLOBAL_TURNOVER_THRESHOLD: 
-                continue
+            # --- INDIVIDUAL THRESHOLD FILTER ---
+            if "-I" in symbol or "FUT" in symbol.upper():
+                if turnover < FUTURE_TURNOVER_THRESHOLD: continue
+            else:
+                if turnover < OPTION_TURNOVER_THRESHOLD: continue
 
             turnover_cr = turnover / 10000000
             
@@ -136,7 +141,7 @@ if __name__ == "__main__":
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
             app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, message_handler))
-            logger.info("Bot is starting polling with new 1.5Cr logic...")
+            logger.info("Bot is starting polling with split thresholds (3Cr Fut / 1Cr Opt)...")
             app.run_polling()
         except Conflict:
             time.sleep(15)
