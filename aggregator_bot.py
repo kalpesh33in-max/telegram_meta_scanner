@@ -25,8 +25,8 @@ except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
 
-OPTION_TURNOVER_THRESHOLD = 10000000  # 1 Crore
-FUTURE_TURNOVER_THRESHOLD = 30000000  # 3 Crore
+# Global Threshold set to 1.5 Crore
+GLOBAL_TURNOVER_THRESHOLD = 15000000 
 
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
@@ -43,8 +43,6 @@ def get_lot_size(symbol):
     if "ICICIBANK" in s: return 700
     if "NIFTY" in s and "BANK" not in s: return 75
     return 1 
-
-
 
 def identify_participant(text):
     t = text.upper()
@@ -72,22 +70,24 @@ def summarize_alerts(alerts):
             lot_size = get_lot_size(symbol)
             num_lots = oi_val / lot_size
             
-            # --- CUSTOM TURNOVER LOGIC ---
-            if "-I" in symbol or "FUT" in symbol.upper():
-                # Future: 1 Lot = 100,000 Turnover (Ignoring Price)
-                turnover = num_lots * 100000 
-            else:
-                # Option: Price * Qty (OI Value)
-                turnover = oi_val * price
+            action = identify_participant(alert)
 
-            # --- TURNOVER FILTER ---
-            if "-I" in symbol or "FUT" in symbol.upper():
-                if turnover < FUTURE_TURNOVER_THRESHOLD: continue
+            # --- NEW TURNOVER LOGIC ---
+            # If Writer or Short Covering, use 50k per lot (Option and Future)
+            if action in ["SHORT COVERING ↗️", "WRITER ✍️"]:
+                turnover = num_lots * 50000
             else:
-                if turnover < OPTION_TURNOVER_THRESHOLD: continue
+                # Standard logic for Buyer/Unwinding
+                if "-I" in symbol or "FUT" in symbol.upper():
+                    turnover = num_lots * 100000 
+                else:
+                    turnover = oi_val * price
+
+            # --- UNIFIED TURNOVER FILTER (1.5 Cr) ---
+            if turnover < GLOBAL_TURNOVER_THRESHOLD: 
+                continue
 
             turnover_cr = turnover / 10000000
-            action = identify_participant(alert)
             
             fut_display = ""
             if f_m:
@@ -135,9 +135,8 @@ if __name__ == "__main__":
     while True:
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-            # This handler is corrected for python-telegram-bot==21.1 for channel posts
             app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, message_handler))
-            logger.info("Bot is starting polling...")
+            logger.info("Bot is starting polling with new 1.5Cr logic...")
             app.run_polling()
         except Conflict:
             time.sleep(15)
