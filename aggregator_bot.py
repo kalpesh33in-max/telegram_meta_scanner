@@ -25,7 +25,7 @@ except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
 
-# USER SPECIFIED THRESHOLDS
+# THRESHOLDS
 OPTION_TURNOVER_THRESHOLD = 10000000  # 1 Crore
 FUTURE_TURNOVER_THRESHOLD = 30000000  # 3 Crore
 
@@ -37,7 +37,7 @@ BUFFER_LOCK = asyncio.Lock()
 # =========================
 
 def get_lot_size(symbol):
-    """Accurate lot sizes for Feb 2026."""
+    """Accurate lot sizes as of Feb 2026."""
     s = symbol.upper().replace(" ", "")
     if "BANKNIFTY" in s: return 30
     if "HDFCBANK" in s: return 550
@@ -74,14 +74,14 @@ def summarize_alerts(alerts):
             action = identify_participant(alert)
             is_future = "-I" in symbol or "FUT" in symbol.upper()
 
-            # --- USER SPECIFIED TURNOVER LOGIC ---
+            # --- CUSTOM TURNOVER LOGIC ---
             if is_future:
-                # Future logic: lot x 1cr
-                turnover = num_lots * 10000000
+                # Future: lot x 100,000
+                turnover = num_lots * 100000
             else:
-                # Option logic
+                # Option Logic
                 if action in ["BUYER 🔵", "UNWINDING ⤵️"]:
-                    # Option long and unwinding: qty x price
+                    # Option long and unwinding: qty x option price
                     turnover = oi_val * price
                 else:
                     # Writer and short covering: lot x 50000
@@ -104,7 +104,7 @@ def summarize_alerts(alerts):
                 f"📊 Price: {price}{fut_display}"
             )
         except Exception as e:
-            logger.error(f"Error processing alert: {e}")
+            logger.error(f"Error: {e}")
             continue
             
     return "\n\n---\n\n".join(passed)
@@ -128,8 +128,7 @@ async def aggregation_task(app):
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
-            except Exception as e:
-                logger.error(f"Failed to send summary: {e}")
+            except: pass
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
@@ -139,7 +138,7 @@ if __name__ == "__main__":
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
             app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST | filters.TEXT, message_handler))
-            logger.info("Bot started with custom math logic (Opt 1Cr / Fut 3Cr)...")
+            logger.info("Bot started with 1Cr Opt / 3Cr Fut logic (Index & Stocks).")
             app.run_polling()
         except Conflict:
             time.sleep(15)
