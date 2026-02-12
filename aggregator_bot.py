@@ -25,9 +25,9 @@ except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
 
-# THRESHOLDS
-OPTION_TURNOVER_THRESHOLD = 10000000  # 1 Crore
-FUTURE_TURNOVER_THRESHOLD = 30000000  # 3 Crore
+# Thresholds
+OPTION_TURNOVER_THRESHOLD = 10000000  # 1 Crore 
+FUTURE_TURNOVER_THRESHOLD = 30000000  # 3 Crore 
 
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
@@ -37,8 +37,8 @@ BUFFER_LOCK = asyncio.Lock()
 # =========================
 
 def get_lot_size(symbol):
-    """Accurate lot sizes as of Feb 2026."""
-    s = symbol.upper().replace(" ", "")
+    """Returns accurate lot sizes for Feb 2026."""
+    s = symbol.upper().replace(" ", "") # Remove spaces for better matching
     if "BANKNIFTY" in s: return 30
     if "HDFCBANK" in s: return 550
     if "ICICIBANK" in s: return 700
@@ -55,6 +55,7 @@ def identify_participant(text):
 
 def summarize_alerts(alerts):
     passed = []
+    # Updated Regex: removed strict \n requirement to capture symbols correctly
     p_sym = re.compile(r"Symbol\s*:\s*(.*?)(?:\n|$)", re.IGNORECASE)
     p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
     p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
@@ -69,32 +70,33 @@ def summarize_alerts(alerts):
             price = float(pr_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
             
+            # Lot size logic now includes ICICI and HDFC
             lot_size = get_lot_size(symbol)
             num_lots = oi_val / lot_size
+            
             action = identify_participant(alert)
-            is_future = "-I" in symbol or "FUT" in symbol.upper()
 
-            # --- CUSTOM TURNOVER LOGIC ---
-            if is_future:
-                # Future: lot x 100,000
-                turnover = num_lots * 100000
+            # --- TURNOVER CALCULATION (Same logic for Index and Stock) ---
+            if action in ["SHORT COVERING ↗️", "WRITER ✍️"]:
+                turnover = num_lots * 50000
             else:
-                # Option Logic
-                if action in ["BUYER 🔵", "UNWINDING ⤵️"]:
-                    # Option long and unwinding: qty x option price
-                    turnover = oi_val * price
+                if "-I" in symbol or "FUT" in symbol.upper():
+                    turnover = num_lots * 100000 
                 else:
-                    # Writer and short covering: lot x 50000
-                    turnover = num_lots * 50000
+                    turnover = oi_val * price
 
-            # --- FILTERING ---
-            if is_future:
+            # --- INDIVIDUAL THRESHOLD FILTER ---
+            if "-I" in symbol or "FUT" in symbol.upper():
                 if turnover < FUTURE_TURNOVER_THRESHOLD: continue
             else:
                 if turnover < OPTION_TURNOVER_THRESHOLD: continue
 
             turnover_cr = turnover / 10000000
-            fut_display = f"\n🔹 **Fut Price: {f_m.group(1)}**" if f_m else ""
+            
+            fut_display = ""
+            if f_m:
+                f_price = float(f_m.group(1))
+                fut_display = f"\n🔹 **Fut Price: {f_price}**"
 
             passed.append(
                 f"🏷 **{symbol}**\n"
@@ -104,7 +106,7 @@ def summarize_alerts(alerts):
                 f"📊 Price: {price}{fut_display}"
             )
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error processing alert: {e}")
             continue
             
     return "\n\n---\n\n".join(passed)
@@ -137,8 +139,9 @@ if __name__ == "__main__":
     while True:
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-            app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST | filters.TEXT, message_handler))
-            logger.info("Bot started with 1Cr Opt / 3Cr Fut logic (Index & Stocks).")
+            # Changed to filter for both private and channel updates
+            app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
+            logger.info("Bot is starting with unified Stock & Index logic...")
             app.run_polling()
         except Conflict:
             time.sleep(15)
