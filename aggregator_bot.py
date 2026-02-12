@@ -25,10 +25,9 @@ except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
 
-# Adjusted Thresholds for Stock Options
-# 1 Crore for Index/High-value, 25 Lakhs for stock options to ensure you see HDFC/ICICI
-OPTION_TURNOVER_THRESHOLD = 2500000  # Lowered to 25 Lakhs for better visibility
-FUTURE_TURNOVER_THRESHOLD = 30000000 # 3 Crore for Futures
+# EXACT USER REQUESTED THRESHOLDS
+OPTION_TURNOVER_THRESHOLD = 10000000  # 1 Crore
+FUTURE_TURNOVER_THRESHOLD = 30000000  # 3 Crore
 
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
@@ -38,12 +37,12 @@ BUFFER_LOCK = asyncio.Lock()
 # =========================
 
 def get_lot_size(symbol):
-    """Updated lot sizes for Feb 2026."""
-    s = symbol.upper().replace(" ", "") # Remove spaces for better matching
+    """Accurate lot sizes for Feb 2026."""
+    s = symbol.upper().replace(" ", "")
     if "BANKNIFTY" in s: return 30
     if "HDFCBANK" in s: return 550
     if "ICICIBANK" in s: return 700
-    if "NIFTY" in s and "BANK" not in s: return 65 # Updated Nifty lot size
+    if "NIFTY" in s and "BANK" not in s: return 75
     return 1 
 
 def identify_participant(text):
@@ -56,7 +55,7 @@ def identify_participant(text):
 
 def summarize_alerts(alerts):
     passed = []
-    # Improved regex to handle potential spaces in symbols like "ICICI BANK"
+    # Enhanced regex to capture symbols and prices reliably
     p_sym = re.compile(r"Symbol\s*:\s*(.*?)(?:\n|$)", re.IGNORECASE)
     p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
     p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
@@ -71,34 +70,27 @@ def summarize_alerts(alerts):
             price = float(pr_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
             
+            # 1. Get correct lot size (Now includes ICICI and HDFC)
             lot_size = get_lot_size(symbol)
             num_lots = oi_val / lot_size
             
-            action = identify_participant(alert)
+            # 2. Get Future Price (fallback to price if not found)
+            f_price = float(f_m.group(1)) if f_m else price
+            
+            # 3. UNIFIED TURNOVER CALCULATION (Notional Value)
+            # This fixes the "0.56 Cr" error by using Future Price for the total contract value
+            turnover = oi_val * f_price 
 
-            # --- TURNOVER CALCULATION ---
-            if action in ["SHORT COVERING ↗️", "WRITER ✍️"]:
-                # Margin based calculation for sellers
-                turnover = num_lots * 50000
-            else:
-                if "-I" in symbol or "FUT" in symbol.upper():
-                    turnover = num_lots * 100000 
-                else:
-                    # Premium based calculation for buyers
-                    turnover = oi_val * price
-
-            # --- FILTERING ---
+            # 4. FILTERING BASED ON USER REQUIREMENTS
             if "-I" in symbol or "FUT" in symbol.upper():
                 if turnover < FUTURE_TURNOVER_THRESHOLD: continue
             else:
                 if turnover < OPTION_TURNOVER_THRESHOLD: continue
 
             turnover_cr = turnover / 10000000
+            action = identify_participant(alert)
             
-            fut_display = ""
-            if f_m:
-                f_price = float(f_m.group(1))
-                fut_display = f"\n🔹 **Fut Price: {f_price}**"
+            fut_display = f"\n🔹 **Fut Price: {f_price}**" if f_m else ""
 
             passed.append(
                 f"🏷 **{symbol}**\n"
@@ -108,7 +100,7 @@ def summarize_alerts(alerts):
                 f"📊 Price: {price}{fut_display}"
             )
         except Exception as e:
-            logger.error(f"Error processing alert: {e}")
+            logger.error(f"Processing Error: {e}")
             continue
             
     return "\n\n---\n\n".join(passed)
@@ -127,15 +119,12 @@ async def aggregation_task(app):
         await asyncio.sleep(AGGREGATION_INTERVAL)
         async with BUFFER_LOCK:
             if not MESSAGE_BUFFER: continue
-            batch = list(MESSAGE_BUFFER)
-            MESSAGE_BUFFER.clear()
-        
+            batch = list(MESSAGE_BUFFER); MESSAGE_BUFFER.clear()
         summary = summarize_alerts(batch)
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
-            except Exception as e:
-                logger.error(f"Failed to send message: {e}")
+            except: pass
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
@@ -144,13 +133,10 @@ if __name__ == "__main__":
     while True:
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-            # Handle both private messages and channel posts
             app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST | filters.TEXT, message_handler))
-            logger.info("Bot started. Monitoring for HDFC and ICICI alerts...")
+            logger.info("Bot started: Filters >1Cr Options, >3Cr Futures.")
             app.run_polling()
         except Conflict:
-            logger.warning("Bot instance already running. Retrying in 15s...")
             time.sleep(15)
         except Exception as e:
-            logger.error(f"Critical error: {e}")
             time.sleep(5)
