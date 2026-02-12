@@ -58,7 +58,7 @@ def summarize_alerts(alerts):
     p_sym = re.compile(r"Symbol\s*:\s*(.*?)\n", re.IGNORECASE)
     p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
     p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
-    p_fut = re.compile(r"FUT PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
+    p_fut = re.compile(r"FUTURE PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
 
     for alert in alerts:
         try:
