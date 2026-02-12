@@ -25,7 +25,7 @@ except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
 
-# EXACT USER REQUESTED THRESHOLDS
+# USER SPECIFIED THRESHOLDS
 OPTION_TURNOVER_THRESHOLD = 10000000  # 1 Crore
 FUTURE_TURNOVER_THRESHOLD = 30000000  # 3 Crore
 
@@ -55,7 +55,6 @@ def identify_participant(text):
 
 def summarize_alerts(alerts):
     passed = []
-    # Enhanced regex to capture symbols and prices reliably
     p_sym = re.compile(r"Symbol\s*:\s*(.*?)(?:\n|$)", re.IGNORECASE)
     p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
     p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
@@ -70,27 +69,32 @@ def summarize_alerts(alerts):
             price = float(pr_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
             
-            # 1. Get correct lot size (Now includes ICICI and HDFC)
             lot_size = get_lot_size(symbol)
             num_lots = oi_val / lot_size
-            
-            # 2. Get Future Price (fallback to price if not found)
-            f_price = float(f_m.group(1)) if f_m else price
-            
-            # 3. UNIFIED TURNOVER CALCULATION (Notional Value)
-            # This fixes the "0.56 Cr" error by using Future Price for the total contract value
-            turnover = oi_val * f_price 
+            action = identify_participant(alert)
+            is_future = "-I" in symbol or "FUT" in symbol.upper()
 
-            # 4. FILTERING BASED ON USER REQUIREMENTS
-            if "-I" in symbol or "FUT" in symbol.upper():
+            # --- USER SPECIFIED TURNOVER LOGIC ---
+            if is_future:
+                # Future logic: lot x 1cr
+                turnover = num_lots * 10000000
+            else:
+                # Option logic
+                if action in ["BUYER 🔵", "UNWINDING ⤵️"]:
+                    # Option long and unwinding: qty x price
+                    turnover = oi_val * price
+                else:
+                    # Writer and short covering: lot x 50000
+                    turnover = num_lots * 50000
+
+            # --- FILTERING ---
+            if is_future:
                 if turnover < FUTURE_TURNOVER_THRESHOLD: continue
             else:
                 if turnover < OPTION_TURNOVER_THRESHOLD: continue
 
             turnover_cr = turnover / 10000000
-            action = identify_participant(alert)
-            
-            fut_display = f"\n🔹 **Fut Price: {f_price}**" if f_m else ""
+            fut_display = f"\n🔹 **Fut Price: {f_m.group(1)}**" if f_m else ""
 
             passed.append(
                 f"🏷 **{symbol}**\n"
@@ -100,7 +104,7 @@ def summarize_alerts(alerts):
                 f"📊 Price: {price}{fut_display}"
             )
         except Exception as e:
-            logger.error(f"Processing Error: {e}")
+            logger.error(f"Error processing alert: {e}")
             continue
             
     return "\n\n---\n\n".join(passed)
@@ -124,7 +128,8 @@ async def aggregation_task(app):
         if summary:
             try:
                 await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
-            except: pass
+            except Exception as e:
+                logger.error(f"Failed to send summary: {e}")
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
@@ -134,7 +139,7 @@ if __name__ == "__main__":
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
             app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST | filters.TEXT, message_handler))
-            logger.info("Bot started: Filters >1Cr Options, >3Cr Futures.")
+            logger.info("Bot started with custom math logic (Opt 1Cr / Fut 3Cr)...")
             app.run_polling()
         except Conflict:
             time.sleep(15)
