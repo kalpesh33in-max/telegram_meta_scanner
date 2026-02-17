@@ -26,7 +26,7 @@ except KeyError as e:
     raise SystemExit
 
 # Thresholds
-OPTION_TURNOVER_THRESHOLD = 10000000  # 1 Crore 
+OPTION_TURNOVER_THRESHOLD = 9000000  # 90 Lakhs 
 FUTURE_TURNOVER_THRESHOLD = 30000000  # 3 Crore 
 
 MESSAGE_BUFFER = []
@@ -76,14 +76,16 @@ def summarize_alerts(alerts):
             
             action = identify_participant(alert)
 
-            # --- TURNOVER CALCULATION (Same logic for Index and Stock) ---
-            if action in ["SHORT COVERING ↗️", "WRITER ✍️"]:
-                turnover = num_lots * 50000
-            else:
-                if "-I" in symbol or "FUT" in symbol.upper():
-                    turnover = num_lots * 100000 
+            # --- TURNOVER CALCULATION ---
+            if "-I" in symbol or "FUT" in symbol.upper():
+                # Futures Logic
+                if action in ["SHORT COVERING ↗️", "WRITER ✍️"]:
+                    turnover = num_lots * 50000
                 else:
-                    turnover = oi_val * price
+                    turnover = num_lots * 100000
+            else:
+                # Options Logic (Same for all actions)
+                turnover = oi_val * price
 
             # --- INDIVIDUAL THRESHOLD FILTER ---
             if "-I" in symbol or "FUT" in symbol.upper():
