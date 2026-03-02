@@ -47,17 +47,27 @@ def get_lot_size(symbol):
     if "NIFTY" in s and "BANK" not in s: return 75
     return 1 
 
+def classify_strike(strike, option_type, future_price):
+    try:
+        strike = float(strike)
+        future_price = float(future_price)
+        if option_type == "CE":
+            return "ITM" if strike < future_price else "OTM"
+        elif option_type == "PE":
+            return "ITM" if strike > future_price else "OTM"
+    except: pass
+    return "N/A"
+
 def identify_participant(text):
     t = text.upper()
     if "SHORT COVERING" in t: return "SHORT COVERING ↗️"
     if "LONG UNWINDING" in t: return "UNWINDING ⤵️"
-    if "WRITER" in t or "SHORT BUILDUP" in t: return "WRITER ✍️"
-    if "BUYER" in t or "LONG BUILDUP" in t: return "BUYER 🔵"
+    if "WRITER" in t or "SHORT BUILDUP" in t or "FUTURE SELL" in t: return "WRITER ✍️"
+    if "BUYER" in t or "LONG BUILDUP" in t or "FUTURE BUY" in t: return "BUYER 🔵"
     return "ACTION"
 
 def summarize_alerts(alerts):
     passed = []
-    # Updated Regex: removed strict \n requirement to capture symbols correctly
     p_sym = re.compile(r"Symbol\s*:\s*(.*?)(?:\n|$)", re.IGNORECASE)
     p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
     p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
@@ -72,19 +82,33 @@ def summarize_alerts(alerts):
             price = float(pr_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
             
-            # Lot size logic now includes ICICI and HDFC
             lot_size = get_lot_size(symbol)
             num_lots = oi_val / lot_size
             
             action = identify_participant(alert)
+
+            # ITM/OTM Detection
+            zone_label = ""
+            if "-I" not in symbol:
+                strike_m = re.search(r"(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}(\d+)(?:CE|PE)$", symbol.upper())
+                opt_type_m = re.search(r"(CE|PE)$", symbol.upper())
+                if strike_m and opt_type_m and f_m:
+                    zone = classify_strike(strike_m.group(1), opt_type_m.group(1), f_m.group(1))
+                    zone_label = f" ({zone})"
 
             # --- TURNOVER CALCULATION ---
             if "-I" in symbol or "FUT" in symbol.upper():
                 # Futures Logic: 100,000 per lot for all actions
                 turnover = num_lots * 100000
             else:
-                # Options Logic (Same for all actions)
-                turnover = oi_val * price
+                # Options Logic
+                if "WRITER" in action or "SHORT COVERING" in action:
+                    # Multiplier based on ITM/OTM
+                    multiplier = 100000 if "ITM" in zone_label else 50000
+                    turnover = num_lots * multiplier
+                else:
+                    # Buyer/Unwinding: Actual Premium
+                    turnover = oi_val * price
 
             # --- INDIVIDUAL THRESHOLD FILTER ---
             if "-I" in symbol or "FUT" in symbol.upper():
@@ -100,7 +124,7 @@ def summarize_alerts(alerts):
                 fut_display = f"\n🔹 **Fut Price: {f_price}**"
 
             passed.append(
-                f"🏷 **{symbol}**\n"
+                f"🏷 **{symbol}{zone_label}**\n"
                 f"⚡ **{action}**\n"
                 f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
                 f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
