@@ -42,6 +42,8 @@ def get_lot_size(symbol):
     if "BANKNIFTY" in s: return 30
     if "HDFCBANK" in s: return 550
     if "ICICIBANK" in s: return 700
+    if "AXISBANK" in s: return 625
+    if "SBIN" in s: return 750
     if "NIFTY" in s and "BANK" not in s: return 75
     return 1 
 
@@ -78,11 +80,8 @@ def summarize_alerts(alerts):
 
             # --- TURNOVER CALCULATION ---
             if "-I" in symbol or "FUT" in symbol.upper():
-                # Futures Logic
-                if action in ["SHORT COVERING ↗️", "WRITER ✍️"]:
-                    turnover = num_lots * 50000
-                else:
-                    turnover = num_lots * 100000
+                # Futures Logic: 100,000 per lot for all actions
+                turnover = num_lots * 100000
             else:
                 # Options Logic (Same for all actions)
                 turnover = oi_val * price
