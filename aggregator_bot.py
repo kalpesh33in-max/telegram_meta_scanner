@@ -25,9 +25,9 @@ except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
 
-# Updated Thresholds as per latest request
-FUTURE_THRESHOLD = 30000000       # 3 Crore
-WRITER_SC_THRESHOLD = 10000000    # 1 Crore
+# Updated Thresholds based on your requirements [cite: 1]
+FUTURE_THRESHOLD = 60000000       # 6 Crore
+WRITER_SC_THRESHOLD = 30000000    # 3 Crore
 BUYER_UW_THRESHOLD = 10000000     # 1 Crore
 
 MESSAGE_BUFFER = []
@@ -40,12 +40,12 @@ BUFFER_LOCK = asyncio.Lock()
 def get_lot_size(symbol):
     """Returns accurate lot sizes for Feb 2026."""
     s = symbol.upper().replace(" ", "")
-    if "BANKNIFTY" in s: return 30
-    if "HDFCBANK" in s: return 550
-    if "ICICIBANK" in s: return 700
-    if "AXISBANK" in s: return 625
-    if "SBIN" in s: return 750
-    if "NIFTY" in s and "BANK" not in s: return 75
+    if "BANKNIFTY" in s: return 30 [cite: 1]
+    if "HDFCBANK" in s: return 550 [cite: 1]
+    if "ICICIBANK" in s: return 700 [cite: 1]
+    if "AXISBANK" in s: return 625 [cite: 1]
+    if "SBIN" in s: return 750 [cite: 1]
+    if "NIFTY" in s and "BANK" not in s: return 75 [cite: 1]
     return 1 
 
 def classify_strike(strike, option_type, future_price):
@@ -96,19 +96,23 @@ def summarize_alerts(alerts):
                     zone = classify_strike(strike_m.group(1), opt_type_m.group(1), f_m.group(1))
                     zone_label = f" ({zone})"
 
-            # --- UPDATED TURNOVER CALCULATION ---
+            # --- UPDATED TURNOVER CALCULATION & THRESHOLD LOGIC ---
             if "-I" in symbol or "FUT" in symbol.upper():
+                # Futures Calculation: Lot * 175,000
                 turnover = num_lots * 175000 
                 current_threshold = FUTURE_THRESHOLD
             else:
+                # Options Logic
                 if "WRITER" in action or "SHORT COVERING" in action:
+                    # Writer/Short Covering: Lot * 125,000
                     turnover = num_lots * 125000
                     current_threshold = WRITER_SC_THRESHOLD
                 else:
-                    turnover = oi_val * price
+                    # Buyer/Unwinding: Actual Premium (Qty * Price)
+                    turnover = oi_val * price [cite: 1]
                     current_threshold = BUYER_UW_THRESHOLD
 
-            # Filter check
+            # Filter based on specific thresholds
             if turnover < current_threshold:
                 continue
 
@@ -161,7 +165,7 @@ if __name__ == "__main__":
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
             app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
-            logger.info("Bot starting with Future 3Cr / Option 1Cr thresholds...")
+            logger.info("Bot starting with 6Cr/3Cr/1Cr thresholds...")
             app.run_polling()
         except Conflict:
             time.sleep(15)
