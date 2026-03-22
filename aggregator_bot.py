@@ -25,19 +25,20 @@ except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
 
-# Thresholds
-FUTURE_THRESHOLD = 60000000       # 6 Cr
-WRITER_SC_THRESHOLD = 30000000    # 3 Cr
-BUYER_UW_THRESHOLD = 10000000     # 1 Cr
+# Updated Thresholds based on your requirements
+FUTURE_THRESHOLD = 60000000       # 6 Crore
+WRITER_SC_THRESHOLD = 30000000    # 3 Crore
+BUYER_UW_THRESHOLD = 10000000     # 1 Crore
 
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
 # =========================
-# UTILITIES
+# UTILITIES & LOGIC
 # =========================
 
 def get_lot_size(symbol):
+    """Returns accurate lot sizes for Feb 2026."""
     s = symbol.upper().replace(" ", "")
     if "BANKNIFTY" in s: return 30
     if "HDFCBANK" in s: return 550
@@ -55,8 +56,7 @@ def classify_strike(strike, option_type, future_price):
             return "ITM" if strike < future_price else "OTM"
         elif option_type == "PE":
             return "ITM" if strike > future_price else "OTM"
-    except:
-        pass
+    except: pass
     return "N/A"
 
 def identify_participant(text):
@@ -67,10 +67,6 @@ def identify_participant(text):
     if "BUYER" in t or "LONG BUILDUP" in t or "FUTURE BUY" in t: return "BUYER 🔵"
     return "ACTION"
 
-# =========================
-# CORE LOGIC
-# =========================
-
 def summarize_alerts(alerts):
     passed = []
     p_sym = re.compile(r"Symbol\s*:\s*(.*?)(?:\n|$)", re.IGNORECASE)
@@ -80,74 +76,76 @@ def summarize_alerts(alerts):
 
     for alert in alerts:
         try:
-            s_m = p_sym.search(alert)
-            oi_m = p_oi.search(alert)
-            pr_m = p_pr.search(alert)
-            f_m = p_fut.search(alert)
-
-            if not (s_m and oi_m and pr_m):
-                continue
+            s_m, oi_m, pr_m, f_m = p_sym.search(alert), p_oi.search(alert), p_pr.search(alert), p_fut.search(alert)
+            if not (s_m and oi_m and pr_m): continue
 
             symbol = s_m.group(1).strip()
             price = float(pr_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
-
+            
             lot_size = get_lot_size(symbol)
             num_lots = oi_val / lot_size
             action = identify_participant(alert)
 
-            # ITM/OTM
+            # ITM/OTM Detection (Perfected Extraction)
             zone_label = ""
-            if "-I" not in symbol:
-                strike_m = re.search(r"(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}(\d+)(?:CE|PE)$", symbol.upper())
-                opt_type_m = re.search(r"(CE|PE)$", symbol.upper())
-                if strike_m and opt_type_m and f_m:
-                    zone = classify_strike(strike_m.group(1), opt_type_m.group(1), f_m.group(1))
+            if "-I" not in symbol and "FUT" not in symbol.upper():
+                # Matches Monthly (MAR26...) or Weekly (26219...) format to isolate real strike
+                strike_m = re.search(r"(?:[A-Z]{3}\d{2}|\d{2}[1-9OND]\d{2})(\d+)(CE|PE)$", symbol.upper())
+                if strike_m and f_m:
+                    strike_val = strike_m.group(1)
+                    option_type = strike_m.group(2)
+                    future_price = float(f_m.group(1))
+                    
+                    zone = classify_strike(strike_val, option_type, future_price)
                     zone_label = f" ({zone})"
 
-            # Turnover Logic
+            # --- TURNOVER CALCULATION & THRESHOLD LOGIC ---
             if "-I" in symbol or "FUT" in symbol.upper():
-                turnover = num_lots * 175000
-                threshold = FUTURE_THRESHOLD
+                # Futures Calculation: Lot * 175,000
+                turnover = num_lots * 175000 
+                current_threshold = FUTURE_THRESHOLD
             else:
+                # Options Logic
                 if "WRITER" in action or "SHORT COVERING" in action:
+                    # Writer/Short Covering: Lot * 125,000
                     turnover = num_lots * 125000
-                    threshold = WRITER_SC_THRESHOLD
+                    current_threshold = WRITER_SC_THRESHOLD
                 else:
+                    # Buyer/Unwinding: Actual Premium (Qty * Price)
                     turnover = oi_val * price
-                    threshold = BUYER_UW_THRESHOLD
+                    current_threshold = BUYER_UW_THRESHOLD
 
-            if turnover < threshold:
+            # Filter based on specific thresholds
+            if turnover < current_threshold:
                 continue
 
             turnover_cr = turnover / 10000000
-
+            
             fut_display = ""
             if f_m:
                 f_price = float(f_m.group(1))
-                fut_display = f"\n🔹 Fut Price: {f_price}"
+                fut_display = f"\n🔹 **Fut Price: {f_price}**"
 
             passed.append(
-                f"🏷 {symbol}{zone_label}\n"
-                f"⚡ {action}\n"
-                f"💰 Turnover: ₹{turnover_cr:.2f} Cr\n"
+                f"🏷 **{symbol}{zone_label}**\n"
+                f"⚡ **{action}**\n"
+                f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
                 f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
                 f"📊 Price: {price}{fut_display}"
             )
-
         except Exception as e:
             logger.error(f"Error processing alert: {e}")
             continue
-
+            
     return "\n\n---\n\n".join(passed)
 
 # =========================
-# TELEGRAM HANDLER
+# TELEGRAM HANDLERS
 # =========================
-
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = update.channel_post or update.message
-    if m and str(m.chat.id) == str(SOURCE_CHAT_ID) and m.text:
+    if m and str(m.chat_id) == str(SOURCE_CHAT_ID) and m.text:
         async with BUFFER_LOCK:
             MESSAGE_BUFFER.append(m.text)
 
@@ -155,35 +153,25 @@ async def aggregation_task(app):
     while True:
         await asyncio.sleep(AGGREGATION_INTERVAL)
         async with BUFFER_LOCK:
-            if not MESSAGE_BUFFER:
-                continue
-            batch = list(MESSAGE_BUFFER)
-            MESSAGE_BUFFER.clear()
-
+            if not MESSAGE_BUFFER: continue
+            batch = list(MESSAGE_BUFFER); MESSAGE_BUFFER.clear()
         summary = summarize_alerts(batch)
-
         if summary:
             try:
-                await app.bot.send_message(TARGET_CHAT_ID, summary)
-            except Exception as e:
-                logger.error(f"Send error: {e}")
+                await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
+            except: pass
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
-
-# =========================
-# MAIN
-# =========================
 
 if __name__ == "__main__":
     while True:
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
             app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
-            logger.info("Bot started...")
+            logger.info("Bot starting with 6Cr/3Cr/1Cr thresholds...")
             app.run_polling()
         except Conflict:
             time.sleep(15)
         except Exception as e:
-            logger.error(f"Main loop error: {e}")
             time.sleep(5)
