@@ -87,14 +87,14 @@ def summarize_alerts(alerts):
             num_lots = oi_val / lot_size
             action = identify_participant(alert)
 
-            # ITM/OTM Detection (Perfected Extraction)
+            # ITM/OTM Detection (Aligned with Summary Bot)
             zone_label = ""
             if "-I" not in symbol and "FUT" not in symbol.upper():
-                # Matches Monthly (MAR26...) or Weekly (26219...) format to isolate real strike
-                strike_m = re.search(r"(?:[A-Z]{3}\d{2}|\d{2}[1-9OND]\d{2})(\d+)(CE|PE)$", symbol.upper())
+                # Monthly Only Regex (MAR26...)
+                strike_m = re.search(r"(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}(\d+)(?:CE|PE)$", symbol.upper())
                 if strike_m and f_m:
                     strike_val = strike_m.group(1)
-                    option_type = strike_m.group(2)
+                    option_type = re.search(r"(CE|PE)$", symbol.upper()).group(1)
                     future_price = float(f_m.group(1))
                     
                     zone = classify_strike(strike_val, option_type, future_price)
