@@ -3,6 +3,8 @@ import asyncio
 import logging
 import re
 import time
+from datetime import datetime
+import pytz
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from telegram.error import Conflict
@@ -27,7 +29,7 @@ except KeyError as e:
 
 # Updated Thresholds based on your requirements
 FUTURE_THRESHOLD = 60000000       # 6 Crore
-WRITER_SC_THRESHOLD = 30000000    # 3 Crore
+WRITER_SC_THRESHOLD = 10000000    # 1 Crore
 BUYER_UW_THRESHOLD = 10000000     # 1 Crore
 
 MESSAGE_BUFFER = []
@@ -37,15 +39,18 @@ BUFFER_LOCK = asyncio.Lock()
 # UTILITIES & LOGIC
 # =========================
 
+def is_market_hours():
+    """Checks if current time is between 09:30 and 15:00 IST."""
+    ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(ist).time()
+    start = datetime.strptime("09:30", "%H:%M").time()
+    end = datetime.strptime("15:00", "%H:%M").time()
+    return start <= now <= end
+
 def get_lot_size(symbol):
-    """Returns accurate lot sizes for Feb 2026."""
+    """Returns accurate lot sizes for April 2026."""
     s = symbol.upper().replace(" ", "")
     if "BANKNIFTY" in s: return 30
-    if "HDFCBANK" in s: return 550
-    if "ICICIBANK" in s: return 700
-    if "AXISBANK" in s: return 625
-    if "SBIN" in s: return 750
-    if "NIFTY" in s and "BANK" not in s: return 75
     return 1 
 
 def classify_strike(strike, option_type, future_price):
@@ -76,63 +81,64 @@ def summarize_alerts(alerts):
 
     for alert in alerts:
         try:
+            # ONLY PROCESS BANKNIFTY
+            if "BANKNIFTY" not in alert.upper():
+                continue
+
             s_m, oi_m, pr_m, f_m = p_sym.search(alert), p_oi.search(alert), p_pr.search(alert), p_fut.search(alert)
-            if not (s_m and oi_m and pr_m): continue
+            if not (s_m and oi_m and pr_m and f_m): continue
 
             symbol = s_m.group(1).strip()
             price = float(pr_m.group(1))
+            future_price = float(f_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
             
             lot_size = get_lot_size(symbol)
             num_lots = oi_val / lot_size
             action = identify_participant(alert)
 
-            # ITM/OTM Detection (True Perfect Logic)
+            # --- ITM Logic with Difference ---
             zone_label = ""
-            if "-I" not in symbol and "FUT" not in symbol.upper():
-                # Robust Extraction: Finds the strike price (numbers) immediately before CE or PE
+            if "FUT" not in symbol.upper():
                 strike_m = re.search(r"(\d+)(CE|PE)$", symbol.upper())
-                if strike_m and f_m:
-                    strike_val = strike_m.group(1)
-                    option_type = strike_m.group(2) # Directly get CE/PE from the match
-                    future_price = float(f_m.group(1))
-                    
+                if strike_m:
+                    strike_val = float(strike_m.group(1))
+                    option_type = strike_m.group(2)
                     zone = classify_strike(strike_val, option_type, future_price)
-                    zone_label = f" ({zone})"
-
-            # --- TURNOVER CALCULATION & THRESHOLD LOGIC ---
-            if "-I" in symbol or "FUT" in symbol.upper():
-                # Futures Calculation: Lot * 175,000
-                turnover = num_lots * 175000 
-                current_threshold = FUTURE_THRESHOLD
-            else:
-                # Options Logic
-                if "WRITER" in action or "SHORT COVERING" in action:
-                    # Writer/Short Covering: Lot * 125,000
-                    turnover = num_lots * 125000
-                    current_threshold = WRITER_SC_THRESHOLD
+                    
+                    # Calculate Difference
+                    diff = round(abs(strike_val - future_price), 2)
+                    
+                    # FILTER: Only ITM and Difference > 500
+                    if zone == "ITM" and diff > 500:
+                        zone_label = f" ({zone}-{diff}-diff)"
+                    else:
+                        continue # Skip Near ITM or OTM
                 else:
-                    # Buyer/Unwinding: Actual Premium (Qty * Price)
-                    turnover = oi_val * price
-                    current_threshold = BUYER_UW_THRESHOLD
+                    continue # Skip if not an option
+            else:
+                continue # Skip Futures as per "only banknify option data need"
 
-            # Filter based on specific thresholds
+            # --- TURNOVER CALCULATION ---
+            if "WRITER" in action or "SHORT COVERING" in action:
+                turnover = num_lots * 9000000
+                current_threshold = WRITER_SC_THRESHOLD
+            else:
+                turnover = oi_val * price
+                current_threshold = BUYER_UW_THRESHOLD
+
             if turnover < current_threshold:
                 continue
 
             turnover_cr = turnover / 10000000
             
-            fut_display = ""
-            if f_m:
-                f_price = float(f_m.group(1))
-                fut_display = f"\n🔹 **Fut Price: {f_price}**"
-
             passed.append(
                 f"🏷 **{symbol}{zone_label}**\n"
                 f"⚡ **{action}**\n"
                 f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
                 f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
-                f"📊 Price: {price}{fut_display}"
+                f"📊 Price: {price}\n"
+                f"🔹 **Fut Price: {future_price}**"
             )
         except Exception as e:
             logger.error(f"Error processing alert: {e}")
@@ -144,6 +150,10 @@ def summarize_alerts(alerts):
 # TELEGRAM HANDLERS
 # =========================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only buffer messages during market hours
+    if not is_market_hours():
+        return
+
     m = update.channel_post or update.message
     if m and str(m.chat_id) == str(SOURCE_CHAT_ID) and m.text:
         async with BUFFER_LOCK:
@@ -152,9 +162,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def aggregation_task(app):
     while True:
         await asyncio.sleep(AGGREGATION_INTERVAL)
+        
+        # Only process buffer during market hours
+        if not is_market_hours():
+            async with BUFFER_LOCK:
+                MESSAGE_BUFFER.clear() # Keep buffer empty outside hours
+            continue
+
         async with BUFFER_LOCK:
             if not MESSAGE_BUFFER: continue
             batch = list(MESSAGE_BUFFER); MESSAGE_BUFFER.clear()
+        
         summary = summarize_alerts(batch)
         if summary:
             try:
