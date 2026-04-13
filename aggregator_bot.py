@@ -121,7 +121,7 @@ def summarize_alerts(alerts):
 
             # --- TURNOVER CALCULATION ---
             if "WRITER" in action or "SHORT COVERING" in action:
-                turnover = num_lots * 90000
+                turnover = num_lots * 120000
                 current_threshold = WRITER_SC_THRESHOLD
             else:
                 turnover = oi_val * price
