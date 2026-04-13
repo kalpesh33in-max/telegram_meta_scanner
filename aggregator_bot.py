@@ -36,63 +36,6 @@ MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
 
 # =========================
-# INTELLIGENCE MEMORY
-# =========================
-ALERTS_MEMORY = [] # Stores: {'time': datetime, 'symbol': str, 'action': str, 'turnover': float, 'direction': str, 'is_whale': bool}
-MEMORY_WINDOW = 15 # Minutes
-
-def update_memory(new_alerts):
-    global ALERTS_MEMORY
-    now = datetime.now()
-    # Add new alerts to memory
-    ALERTS_MEMORY.extend(new_alerts)
-    # Remove alerts older than 15 minutes
-    ALERTS_MEMORY = [a for a in ALERTS_MEMORY if (now - a['time']).total_seconds() < MEMORY_WINDOW * 60]
-
-def get_intelligence_report():
-    if not ALERTS_MEMORY: return ""
-    
-    bull_cr = sum(a['turnover'] for a in ALERTS_MEMORY if a['direction'] == "BULL")
-    bear_cr = sum(a['turnover'] for a in ALERTS_MEMORY if a['direction'] == "BEAR")
-    total_cr = bull_cr + bear_cr
-    
-    if total_cr == 0: return ""
-    
-    bull_pct = (bull_cr / total_cr) * 100
-    bear_pct = (bear_cr / total_cr) * 100
-    
-    # Cluster Detection
-    recent_5 = [a for a in ALERTS_MEMORY if (datetime.now() - a['time']).total_seconds() < 300]
-    momentum = "HIGH 🚀" if len(recent_5) >= 3 else "MEDIUM ⚖️" if len(recent_5) >= 2 else "LOW 🐢"
-    
-    # Signal Logic
-    if bull_pct > 75 and momentum == "HIGH 🚀":
-        signal = "CONFIRMED BUY ✅"
-        strength = f"{bull_pct:.0f}% (ULTRA-BULLISH)"
-    elif bear_pct > 75 and momentum == "HIGH 🚀":
-        signal = "CONFIRMED SELL 🔻"
-        strength = f"{bear_pct:.0f}% (ULTRA-BEARISH)"
-    elif abs(bull_pct - bear_pct) < 20:
-        signal = "AVOID / SIDEWAYS ❌"
-        strength = "CONFLICTED"
-    else:
-        signal = "MONITOR 👁️"
-        strength = f"Bull {bull_pct:.0f}% | Bear {bear_pct:.0f}%"
-
-    whale_detected = any(a['is_whale'] for a in ALERTS_MEMORY)
-    whale_tag = "\n🐳 **WHALE DETECTED (Positional Activity)**" if whale_detected else ""
-
-    report = (
-        f"\n--- 🧠 **INTELLIGENCE LAYER** ---\n"
-        f"🔥 **STRENGTH:** {strength}\n"
-        f"📊 **CLUSTER:** ₹{total_cr:.2f} Cr in {MEMORY_WINDOW}m\n"
-        f"🚀 **MOMENTUM:** {momentum} ({len(recent_5)} hits/5m)\n"
-        f"🎯 **BOT SIGNAL: {signal}**"
-        f"{whale_tag}"
-    )
-    return report
-
-# =========================
 # UTILITIES & LOGIC
 # =========================
 
@@ -131,8 +74,6 @@ def identify_participant(text):
 
 def summarize_alerts(alerts):
     passed = []
-    new_memory_entries = []
-    
     p_sym = re.compile(r"Symbol\s*:\s*(.*?)(?:\n|$)", re.IGNORECASE)
     p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
     p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
@@ -158,9 +99,6 @@ def summarize_alerts(alerts):
 
             # --- ITM Logic with Difference ---
             zone_label = ""
-            is_deep_itm = False
-            option_type = ""
-            
             if "FUT" not in symbol.upper():
                 strike_m = re.search(r"(\d+)(CE|PE)$", symbol.upper())
                 if strike_m:
@@ -174,7 +112,6 @@ def summarize_alerts(alerts):
                     # FILTER: Only ITM and Difference > 500
                     if zone == "ITM" and diff > 500:
                         zone_label = f" ({zone}-{diff}-diff)"
-                        if diff > 1500: is_deep_itm = True
                     else:
                         continue # Skip Near ITM or OTM
                 else:
@@ -195,25 +132,6 @@ def summarize_alerts(alerts):
 
             turnover_cr = turnover / 10000000
             
-            # --- DIRECTION MAPPING ---
-            direction = "NEUTRAL"
-            if option_type == "PE":
-                if "WRITER" in action or "BUYER" in action: direction = "BULL"
-                if "SHORT COVERING" in action or "UNWINDING" in action: direction = "BEAR"
-            elif option_type == "CE":
-                if "WRITER" in action or "BUYER" in action: direction = "BEAR"
-                if "SHORT COVERING" in action or "UNWINDING" in action: direction = "BULL"
-
-            # --- MEMORY TRACKING ---
-            new_memory_entries.append({
-                'time': datetime.now(),
-                'symbol': symbol,
-                'action': action,
-                'turnover': turnover_cr,
-                'direction': direction,
-                'is_whale': (turnover_cr > 300 or (is_deep_itm and turnover_cr > 100))
-            })
-
             passed.append(
                 f"🏷 **{symbol}{zone_label}**\n"
                 f"⚡ **{action}**\n"
@@ -225,16 +143,8 @@ def summarize_alerts(alerts):
         except Exception as e:
             logger.error(f"Error processing alert: {e}")
             continue
-    
-    if new_memory_entries:
-        update_memory(new_memory_entries)
             
-    if not passed: return ""
-    
-    main_body = "\n\n---\n\n".join(passed)
-    intel_report = get_intelligence_report()
-    
-    return main_body + intel_report
+    return "\n\n---\n\n".join(passed)
 
 # =========================
 # TELEGRAM HANDLERS
