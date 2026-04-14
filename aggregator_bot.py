@@ -40,11 +40,11 @@ BUFFER_LOCK = asyncio.Lock()
 # =========================
 
 def is_market_hours():
-    """Checks if current time is between 09:30 and 15:00 IST."""
+    """Checks if current time is between 09:00 and 15:30 IST."""
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist).time()
-    start = datetime.strptime("09:30", "%H:%M").time()
-    end = datetime.strptime("15:00", "%H:%M").time()
+    start = datetime.strptime("09:00", "%H:%M").time()
+    end = datetime.strptime("15:30", "%H:%M").time()
     return start <= now <= end
 
 def get_lot_size(symbol):
