@@ -34,6 +34,7 @@ BUYER_UW_THRESHOLD = 10000000     # 1 Crore
 DEEP_ITM_DIFF_THRESHOLD = 500
 NEAR_ITM_DIFF_THRESHOLD = 100
 NEAR_ITM_MIN_LOTS = 1000
+FUTURE_MIN_LOTS = 500
 
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
@@ -54,6 +55,8 @@ def get_lot_size(symbol):
     """Returns accurate lot sizes for April 2026."""
     s = symbol.upper().replace(" ", "")
     if "BANKNIFTY" in s: return 30
+    if "HDFCBANK" in s: return 550
+    if "ICICIBANK" in s: return 700
     return 1 
 
 def classify_strike(strike, option_type, future_price):
@@ -84,8 +87,10 @@ def summarize_alerts(alerts):
 
     for alert in alerts:
         try:
-            # ONLY PROCESS BANKNIFTY
-            if "BANKNIFTY" not in alert.upper():
+            upper_alert = alert.upper()
+
+            # ONLY PROCESS BANKNIFTY / HDFCBANK / ICICIBANK
+            if not any(name in upper_alert for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK"]):
                 continue
 
             s_m, oi_m, pr_m, f_m = p_sym.search(alert), p_oi.search(alert), p_pr.search(alert), p_fut.search(alert)
@@ -102,7 +107,26 @@ def summarize_alerts(alerts):
 
             # --- ITM Logic with Difference ---
             zone_label = ""
-            if "FUT" not in symbol.upper():
+            if "FUT" in symbol.upper():
+                allowed_future = any(name in symbol.upper() for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK"])
+                if not allowed_future or num_lots < FUTURE_MIN_LOTS:
+                    continue
+
+                turnover = oi_val * price
+                if turnover < FUTURE_THRESHOLD:
+                    continue
+
+                turnover_cr = turnover / 10000000
+                passed.append(
+                    f"🏷 **{symbol}**\n"
+                    f"⚡ **{action}**\n"
+                    f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
+                    f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
+                    f"📊 Price: {price}\n"
+                    f"🔹 **Fut Price: {future_price}**"
+                )
+                continue
+            else:
                 strike_m = re.search(r"(\d+)(CE|PE)$", symbol.upper())
                 if strike_m:
                     strike_val = float(strike_m.group(1))
@@ -126,8 +150,6 @@ def summarize_alerts(alerts):
                         continue
                 else:
                     continue # Skip if not an option
-            else:
-                continue # Skip Futures as per "only banknify option data need"
 
             # --- TURNOVER CALCULATION ---
             if "WRITER" in action or "SHORT COVERING" in action:
