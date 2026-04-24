@@ -31,7 +31,7 @@ except KeyError as e:
 FUTURE_THRESHOLD = 60000000       # 6 Crore
 WRITER_SC_THRESHOLD = 10000000    # 1 Crore
 BUYER_UW_THRESHOLD = 10000000     # 1 Crore
-DEEP_ITM_DIFF_THRESHOLD = 300
+DEEP_ITM_DIFF_THRESHOLD = 500
 NEAR_ITM_DIFF_THRESHOLD = 100
 NEAR_ITM_MIN_LOTS = 1000
 
@@ -113,8 +113,8 @@ def summarize_alerts(alerts):
                     diff = round(abs(strike_val - future_price), 2)
                     
                     # FILTER:
-                    # 1. Deep ITM if diff >= 300
-                    # 2. Any ITM below 300 diff if lots >= 1000
+                    # 1. Deep ITM if diff >= 500
+                    # 2. Any ITM below 500 diff if lots >= 1000
                     # 3. Near-ITM if strike is within +/-100 of future price and lots >= 1000
                     if zone == "ITM" and diff >= DEEP_ITM_DIFF_THRESHOLD:
                         zone_label = f" ({zone}-{diff}-diff)"
