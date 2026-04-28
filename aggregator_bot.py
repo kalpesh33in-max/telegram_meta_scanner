@@ -35,6 +35,26 @@ DEEP_ITM_DIFF_THRESHOLD = 500
 NEAR_ITM_DIFF_THRESHOLD = 100
 NEAR_ITM_MIN_LOTS = 1000
 FUTURE_MIN_LOTS = 500
+TRACK_SYMBOLS = [
+    "BANKNIFTY",
+    "HDFCBANK",
+    "ICICIBANK",
+    "NIFTY",
+    "SENSEX",
+    "RELIANCE",
+    "MIDCPNIFTY",
+    "FINNIFTY",
+]
+NEAR_ITM_RANGE = {
+    "BANKNIFTY": 100,
+    "HDFCBANK": 100,
+    "ICICIBANK": 100,
+    "NIFTY": 50,
+    "SENSEX": 100,
+    "RELIANCE": 10,
+    "MIDCPNIFTY": 25,
+    "FINNIFTY": 50,
+}
 
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
@@ -57,12 +77,20 @@ def get_lot_size(symbol):
     if "BANKNIFTY" in s: return 30
     if "HDFCBANK" in s: return 550
     if "ICICIBANK" in s: return 700
+    if "NIFTY" in s and "BANKNIFTY" not in s and "MIDCPNIFTY" not in s and "FINNIFTY" not in s: return 65
+    if "SENSEX" in s: return 20
+    if "RELIANCE" in s: return 500
+    if "MIDCPNIFTY" in s: return 120
+    if "FINNIFTY" in s: return 60
     return 1 
 
-def classify_strike(strike, option_type, future_price):
+def classify_strike(strike, option_type, future_price, symbol=None):
     try:
         strike = float(strike)
         future_price = float(future_price)
+        near_range = NEAR_ITM_RANGE.get(symbol, 0)
+        if abs(strike - future_price) <= near_range:
+            return "ITM"
         if option_type == "CE":
             return "ITM" if strike < future_price else "OTM"
         elif option_type == "PE":
@@ -89,8 +117,7 @@ def summarize_alerts(alerts):
         try:
             upper_alert = alert.upper()
 
-            # ONLY PROCESS BANKNIFTY / HDFCBANK / ICICIBANK
-            if not any(name in upper_alert for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK"]):
+            if not any(name in upper_alert for name in TRACK_SYMBOLS):
                 continue
 
             s_m, oi_m, pr_m, f_m = p_sym.search(alert), p_oi.search(alert), p_pr.search(alert), p_fut.search(alert)
@@ -108,7 +135,7 @@ def summarize_alerts(alerts):
             # --- ITM Logic with Difference ---
             zone_label = ""
             if "FUT" in symbol.upper():
-                allowed_future = any(name in symbol.upper() for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK"])
+                allowed_future = any(name in symbol.upper() for name in TRACK_SYMBOLS)
                 if not allowed_future or num_lots < FUTURE_MIN_LOTS:
                     continue
 
@@ -131,20 +158,22 @@ def summarize_alerts(alerts):
                 if strike_m:
                     strike_val = float(strike_m.group(1))
                     option_type = strike_m.group(2)
-                    zone = classify_strike(strike_val, option_type, future_price)
+                    base_symbol = next((name for name in TRACK_SYMBOLS if name in symbol.upper()), None)
+                    zone = classify_strike(strike_val, option_type, future_price, base_symbol)
                     
                     # Calculate Difference
                     diff = round(abs(strike_val - future_price), 2)
+                    near_itm_diff_threshold = NEAR_ITM_RANGE.get(base_symbol, NEAR_ITM_DIFF_THRESHOLD)
                     
                     # FILTER:
                     # 1. Deep ITM if diff >= 500
                     # 2. Any ITM below 500 diff if lots >= 1000
-                    # 3. Near-ITM if strike is within +/-100 of future price and lots >= 1000
+                    # 3. Near-ITM if strike is within symbol-specific range and lots >= 1000
                     if zone == "ITM" and diff >= DEEP_ITM_DIFF_THRESHOLD:
                         zone_label = f" ({zone}-{diff}-diff)"
                     elif zone == "ITM" and diff < DEEP_ITM_DIFF_THRESHOLD and num_lots >= NEAR_ITM_MIN_LOTS:
                         zone_label = f" (ITM-{diff}-diff-HIGHLOTS)"
-                    elif diff <= NEAR_ITM_DIFF_THRESHOLD and num_lots >= NEAR_ITM_MIN_LOTS:
+                    elif diff <= near_itm_diff_threshold and num_lots >= NEAR_ITM_MIN_LOTS:
                         zone_label = f" (NEAR-ITM-{diff}-diff)"
                     else:
                         continue
