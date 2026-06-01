@@ -35,7 +35,9 @@ DEEP_ITM_DIFF_THRESHOLD = 500
 NEAR_ITM_DIFF_THRESHOLD = 100
 NEAR_ITM_MIN_LOTS = 1000
 FUTURE_MIN_LOTS = 500
-TRACK_SYMBOLS = [
+MCX_FUTURE_MIN_LOTS = 300
+MCX_OPTION_MIN_LOTS = 100
+NSE_TRACK_SYMBOLS = [
     "BANKNIFTY",
     "HDFCBANK",
     "ICICIBANK",
@@ -45,6 +47,11 @@ TRACK_SYMBOLS = [
     "MIDCPNIFTY",
     "FINNIFTY",
 ]
+MCX_TRACK_SYMBOLS = [
+    "CRUDEOIL",
+    "NATURALGAS",
+]
+TRACK_SYMBOLS = NSE_TRACK_SYMBOLS + MCX_TRACK_SYMBOLS
 NEAR_ITM_RANGE = {
     "BANKNIFTY": 100,
     "HDFCBANK": 100,
@@ -64,12 +71,14 @@ BUFFER_LOCK = asyncio.Lock()
 # =========================
 
 def is_market_hours():
-    """Checks if current time is between 09:00 and 15:30 IST."""
+    """Checks if current time is inside NSE or MCX alert windows."""
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist).time()
-    start = datetime.strptime("09:00", "%H:%M").time()
-    end = datetime.strptime("15:30", "%H:%M").time()
-    return start <= now <= end
+    nse_start = datetime.strptime("09:00", "%H:%M").time()
+    nse_end = datetime.strptime("15:30", "%H:%M").time()
+    mcx_start = datetime.strptime("15:30", "%H:%M").time()
+    mcx_end = datetime.strptime("23:30", "%H:%M").time()
+    return (nse_start <= now <= nse_end) or (mcx_start <= now <= mcx_end)
 
 def get_lot_size(symbol):
     """Returns accurate lot sizes for April 2026."""
@@ -82,12 +91,24 @@ def get_lot_size(symbol):
     if "RELIANCE" in s: return 500
     if "MIDCPNIFTY" in s: return 120
     if "FINNIFTY" in s: return 60
+    if "CRUDEOIL" in s: return 1
+    if "NATURALGAS" in s: return 1
     return 1 
+
+def is_mcx_symbol(symbol):
+    s = symbol.upper().replace(" ", "")
+    return any(name in s for name in MCX_TRACK_SYMBOLS)
 
 def classify_strike(strike, option_type, future_price, symbol=None):
     try:
         strike = float(strike)
         future_price = float(future_price)
+        if symbol in MCX_TRACK_SYMBOLS:
+            if option_type == "CE":
+                return "ITM" if strike < future_price else "OTM"
+            if option_type == "PE":
+                return "ITM" if strike > future_price else "OTM"
+
         near_range = NEAR_ITM_RANGE.get(symbol, 0)
         if abs(strike - future_price) <= near_range:
             return "ITM"
@@ -103,7 +124,7 @@ def identify_participant(text):
     if "SHORT COVERING" in t: return "SHORT COVERING ↗️"
     if "LONG UNWINDING" in t: return "UNWINDING ⤵️"
     if "WRITER" in t or "SHORT BUILDUP" in t or "FUTURE SELL" in t: return "WRITER ✍️"
-    if "BUYER" in t or "LONG BUILDUP" in t or "FUTURE BUY" in t: return "BUYER 🔵"
+    if "BUYER" in t or "LONG BUILDUP" in t or "FUTURE BUY" in t or "CALL BUY" in t or "PUT BUY" in t: return "BUYER 🔵"
     return "ACTION"
 
 def summarize_alerts(alerts):
@@ -131,11 +152,46 @@ def summarize_alerts(alerts):
             lot_size = get_lot_size(symbol)
             num_lots = oi_val / lot_size
             action = identify_participant(alert)
+            base_symbol = next((name for name in TRACK_SYMBOLS if name in symbol.upper()), None)
+
+            if is_mcx_symbol(symbol):
+                if "FUT" in symbol.upper():
+                    if num_lots < MCX_FUTURE_MIN_LOTS:
+                        continue
+
+                    passed.append(
+                        f"🏷 **{symbol}**\n"
+                        f"⚡ **{action}**\n"
+                        f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
+                        f"📊 Price: {price}\n"
+                        f"🔹 **Fut Price: {future_price}**"
+                    )
+                    continue
+
+                strike_m = re.search(r"(\d+)(CE|PE)$", symbol.upper())
+                if not strike_m:
+                    continue
+
+                strike_val = float(strike_m.group(1))
+                option_type = strike_m.group(2)
+                zone = classify_strike(strike_val, option_type, future_price, base_symbol)
+                if zone != "ITM" or num_lots < MCX_OPTION_MIN_LOTS:
+                    continue
+
+                diff = round(abs(strike_val - future_price), 2)
+                passed.append(
+                    f"🏷 **{symbol} (MCX-ITM-{diff}-diff)**\n"
+                    f"⚡ **{action}**\n"
+                    f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
+                    f"📊 Price: {price}\n"
+                    f"🔹 **Fut Price: {future_price}**"
+                )
+                continue
 
             # --- ITM Logic with Difference ---
             zone_label = ""
             if "FUT" in symbol.upper():
-                allowed_future = any(name in symbol.upper() for name in TRACK_SYMBOLS)
+                allowed_future = any(name in symbol.upper() for name in NSE_TRACK_SYMBOLS)
                 if not allowed_future or num_lots < FUTURE_MIN_LOTS:
                     continue
 
@@ -158,7 +214,7 @@ def summarize_alerts(alerts):
                 if strike_m:
                     strike_val = float(strike_m.group(1))
                     option_type = strike_m.group(2)
-                    base_symbol = next((name for name in TRACK_SYMBOLS if name in symbol.upper()), None)
+                    base_symbol = next((name for name in NSE_TRACK_SYMBOLS if name in symbol.upper()), None)
                     zone = classify_strike(strike_val, option_type, future_price, base_symbol)
                     
                     # Calculate Difference
@@ -248,7 +304,7 @@ if __name__ == "__main__":
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
             app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
-            logger.info("Bot starting with 6Cr/3Cr/1Cr thresholds...")
+            logger.info("Bot starting with NSE turnover filters and MCX ITM/lot filters...")
             app.run_polling()
         except Conflict:
             time.sleep(15)
