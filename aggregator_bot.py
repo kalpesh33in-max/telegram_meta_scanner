@@ -3,6 +3,7 @@ import asyncio
 import logging
 import re
 import time
+import pandas as pd
 from datetime import datetime
 import pytz
 from telegram import Update
@@ -37,30 +38,75 @@ NEAR_ITM_MIN_LOTS = 1000
 FUTURE_MIN_LOTS = 500
 MCX_FUTURE_MIN_LOTS = 300
 MCX_OPTION_MIN_LOTS = 100
+
+# =========================
+# DYNAMIC INSTRUMENT DATA
+# =========================
+INSTRUMENTS_CSV_PATH = r"C:\Users\kalpe\zarodha\instruments.csv"
+DYNAMIC_LOT_SIZES = {}
+DYNAMIC_NEAR_ITM_RANGE = {}
+
+def load_instrument_data():
+    """Loads lot sizes and calculates strike intervals from instruments.csv."""
+    global DYNAMIC_LOT_SIZES, DYNAMIC_NEAR_ITM_RANGE
+    try:
+        if not os.path.exists(INSTRUMENTS_CSV_PATH):
+            logger.warning(f"Instruments CSV not found at {INSTRUMENTS_CSV_PATH}. Using hardcoded fallbacks.")
+            return
+
+        logger.info(f"Loading instrument data from {INSTRUMENTS_CSV_PATH}...")
+        df = pd.read_csv(INSTRUMENTS_CSV_PATH, low_memory=False)
+        
+        # Build Lot Sizes from all instruments
+        for name, group in df.groupby("name"):
+            if pd.isna(name): continue
+            lots = group["lot_size"].mode()
+            if not lots.empty:
+                DYNAMIC_LOT_SIZES[name] = int(lots[0])
+        
+        # Calculate Near ITM Range from Options (Focusing on current month data)
+        # Assuming current month is June 2026 based on prompt context
+        opt_df = df[df["segment"].str.contains("-OPT", na=False)].copy()
+        
+        # Try to find current month expiries to get the most accurate intervals
+        # Format in CSV is YYYY-MM-DD
+        current_month_str = "2026-06" 
+        current_opt_df = opt_df[opt_df["expiry"].str.startswith(current_month_str, na=False)].copy()
+        
+        # If no June data, fallback to all options
+        processing_df = current_opt_df if not current_opt_df.empty else opt_df
+        
+        for name, group in processing_df.groupby("name"):
+            strikes = sorted(group[group["strike"] > 0]["strike"].unique())
+            if len(strikes) >= 2:
+                # Interval is the gap between two strikes (User: "two strike diffrence is our interval")
+                interval = strikes[1] - strikes[0]
+                DYNAMIC_NEAR_ITM_RANGE[name] = interval
+            else:
+                DYNAMIC_NEAR_ITM_RANGE[name] = 100 # Default
+
+        logger.info(f"Successfully loaded {len(DYNAMIC_LOT_SIZES)} symbols from CSV. Reliance ITM Range: {DYNAMIC_NEAR_ITM_RANGE.get('RELIANCE', 'N/A')}")
+    except Exception as e:
+        logger.error(f"Error loading instrument data from CSV: {e}")
+
+# Initial load
+load_instrument_data()
+
 NSE_TRACK_SYMBOLS = [
-    "BANKNIFTY",
-    "HDFCBANK",
-    "ICICIBANK",
-    "NIFTY",
-    "SENSEX",
-    "RELIANCE",
-    "MIDCPNIFTY",
-    "FINNIFTY",
+    "BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+    "BAJFINANCE", "BAJAJFINSV", "INDUSINDBK", "BANKBARODA", "PNB", "RELIANCE",
+    "ONGC", "NTPC", "POWERGRID", "COALINDIA", "BPCL", "GAIL", "INFOSYS", "TCS",
+    "HCLTECH", "WIPRO", "TECHM", "TATAMOTORS", "M&M", "MARUTI", "ASHOKLEY",
+    "LT", "SUNPHARMA", "ITC", "HINDUNILVR", "NIFTY", "SENSEX", "MIDCPNIFTY", "FINNIFTY",
 ]
 MCX_TRACK_SYMBOLS = [
     "CRUDEOIL",
-    "NATURALGAS",
 ]
 TRACK_SYMBOLS = NSE_TRACK_SYMBOLS + MCX_TRACK_SYMBOLS
-NEAR_ITM_RANGE = {
-    "BANKNIFTY": 100,
-    "HDFCBANK": 100,
-    "ICICIBANK": 100,
-    "NIFTY": 50,
-    "SENSEX": 100,
-    "RELIANCE": 10,
-    "MIDCPNIFTY": 25,
-    "FINNIFTY": 50,
+
+# Hardcoded Fallbacks for NEAR_ITM_RANGE (Used if dynamic fails)
+NEAR_ITM_RANGE_FALLBACK = {
+    "BANKNIFTY": 100, "NIFTY": 50, "RELIANCE": 10, "MIDCPNIFTY": 25, "FINNIFTY": 50, "SENSEX": 100
 }
 
 MESSAGE_BUFFER = []
@@ -81,18 +127,50 @@ def is_market_hours():
     return (nse_start <= now <= nse_end) or (mcx_start <= now <= mcx_end)
 
 def get_lot_size(symbol):
-    """Returns accurate lot sizes for April 2026."""
+    """Returns accurate lot sizes, prioritizing dynamic data from CSV."""
     s = symbol.upper().replace(" ", "")
+    for name in TRACK_SYMBOLS:
+        if name in s:
+            if name in DYNAMIC_LOT_SIZES:
+                return DYNAMIC_LOT_SIZES[name]
+    
+    # Static Fallbacks (April 2026)
     if "BANKNIFTY" in s: return 30
     if "HDFCBANK" in s: return 550
     if "ICICIBANK" in s: return 700
-    if "NIFTY" in s and "BANKNIFTY" not in s and "MIDCPNIFTY" not in s and "FINNIFTY" not in s: return 65
+    if "SBIN" in s: return 1500
+    if "AXISBANK" in s: return 625
+    if "KOTAKBANK" in s: return 400
+    if "BAJFINANCE" in s: return 125
+    if "BAJAJFINSV" in s: return 500
+    if "INDUSINDBK" in s: return 500
+    if "BANKBARODA" in s: return 4850
+    if "PNB" in s: return 8000
+    if "RELIANCE" in s: return 250
+    if "ONGC" in s: return 3850
+    if "NTPC" in s: return 3000
+    if "POWERGRID" in s: return 3600
+    if "COALINDIA" in s: return 2100
+    if "BPCL" in s: return 1800
+    if "GAIL" in s: return 4550
+    if "INFOSYS" in s: return 400
+    if "TCS" in s: return 175
+    if "HCLTECH" in s: return 700
+    if "WIPRO" in s: return 1500
+    if "TECHM" in s: return 600
+    if "TATAMOTORS" in s: return 550
+    if "M&M" in s: return 350
+    if "MARUTI" in s: return 50
+    if "ASHOKLEY" in s: return 5000
+    if "LT" in s: return 150
+    if "SUNPHARMA" in s: return 700
+    if "ITC" in s: return 1600
+    if "HINDUNILVR" in s: return 300
+    if "NIFTY" in s: return 65
     if "SENSEX" in s: return 20
-    if "RELIANCE" in s: return 500
     if "MIDCPNIFTY" in s: return 120
     if "FINNIFTY" in s: return 60
     if "CRUDEOIL" in s: return 1
-    if "NATURALGAS" in s: return 1
     return 1 
 
 def is_mcx_symbol(symbol):
@@ -109,7 +187,10 @@ def classify_strike(strike, option_type, future_price, symbol=None):
             if option_type == "PE":
                 return "ITM" if strike > future_price else "OTM"
 
-        near_range = NEAR_ITM_RANGE.get(symbol, 0)
+        # Use dynamic range from CSV if available, else fallback
+        near_range = DYNAMIC_NEAR_ITM_RANGE.get(symbol, NEAR_ITM_RANGE_FALLBACK.get(symbol, 100))
+        
+        # ITM Logic: Price should be within one strike interval for Near-ITM
         if abs(strike - future_price) <= near_range:
             return "ITM"
         if option_type == "CE":
@@ -137,7 +218,6 @@ def summarize_alerts(alerts):
     for alert in alerts:
         try:
             upper_alert = alert.upper()
-
             if not any(name in upper_alert for name in TRACK_SYMBOLS):
                 continue
 
@@ -156,144 +236,72 @@ def summarize_alerts(alerts):
 
             if is_mcx_symbol(symbol):
                 if "FUT" in symbol.upper():
-                    if num_lots < MCX_FUTURE_MIN_LOTS:
-                        continue
-
-                    passed.append(
-                        f"🏷 **{symbol}**\n"
-                        f"⚡ **{action}**\n"
-                        f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
-                        f"📊 Price: {price}\n"
-                        f"🔹 **Fut Price: {future_price}**"
-                    )
+                    if num_lots < MCX_FUTURE_MIN_LOTS: continue
+                    passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
                     continue
-
                 strike_m = re.search(r"(\d+)(CE|PE)$", symbol.upper())
-                if not strike_m:
-                    continue
-
+                if not strike_m: continue
                 strike_val = float(strike_m.group(1))
                 option_type = strike_m.group(2)
                 zone = classify_strike(strike_val, option_type, future_price, base_symbol)
-                if zone != "ITM" or num_lots < MCX_OPTION_MIN_LOTS:
-                    continue
-
+                if zone != "ITM" or num_lots < MCX_OPTION_MIN_LOTS: continue
                 diff = round(abs(strike_val - future_price), 2)
-                passed.append(
-                    f"🏷 **{symbol} (MCX-ITM-{diff}-diff)**\n"
-                    f"⚡ **{action}**\n"
-                    f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
-                    f"📊 Price: {price}\n"
-                    f"🔹 **Fut Price: {future_price}**"
-                )
+                passed.append(f"🏷 **{symbol} (MCX-ITM-{diff}-diff)**\n⚡ **{action}**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
                 continue
 
-            # --- ITM Logic with Difference ---
             zone_label = ""
             if "FUT" in symbol.upper():
-                allowed_future = any(name in symbol.upper() for name in NSE_TRACK_SYMBOLS)
-                if not allowed_future or num_lots < FUTURE_MIN_LOTS:
-                    continue
-
+                if num_lots < FUTURE_MIN_LOTS: continue
                 turnover = oi_val * price
-                if turnover < FUTURE_THRESHOLD:
-                    continue
-
+                if turnover < FUTURE_THRESHOLD: continue
                 turnover_cr = turnover / 10000000
-                passed.append(
-                    f"🏷 **{symbol}**\n"
-                    f"⚡ **{action}**\n"
-                    f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
-                    f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
-                    f"📊 Price: {price}\n"
-                    f"🔹 **Fut Price: {future_price}**"
-                )
+                passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
                 continue
             else:
                 strike_m = re.search(r"(\d+)(CE|PE)$", symbol.upper())
                 if strike_m:
                     strike_val = float(strike_m.group(1))
                     option_type = strike_m.group(2)
-                    base_symbol = next((name for name in NSE_TRACK_SYMBOLS if name in symbol.upper()), None)
                     zone = classify_strike(strike_val, option_type, future_price, base_symbol)
-                    
-                    # Calculate Difference
                     diff = round(abs(strike_val - future_price), 2)
-                    near_itm_diff_threshold = NEAR_ITM_RANGE.get(base_symbol, NEAR_ITM_DIFF_THRESHOLD)
-                    
-                    # FILTER:
-                    # 1. Deep ITM if diff >= 500
-                    # 2. Any ITM below 500 diff if lots >= 1000
-                    # 3. Near-ITM if strike is within symbol-specific range and lots >= 1000
-                    if zone == "ITM" and diff >= DEEP_ITM_DIFF_THRESHOLD:
-                        zone_label = f" ({zone}-{diff}-diff)"
-                    elif zone == "ITM" and diff < DEEP_ITM_DIFF_THRESHOLD and num_lots >= NEAR_ITM_MIN_LOTS:
-                        zone_label = f" (ITM-{diff}-diff-HIGHLOTS)"
-                    elif diff <= near_itm_diff_threshold and num_lots >= NEAR_ITM_MIN_LOTS:
-                        zone_label = f" (NEAR-ITM-{diff}-diff)"
-                    else:
-                        continue
-                else:
-                    continue # Skip if not an option
+                    near_itm_diff_threshold = DYNAMIC_NEAR_ITM_RANGE.get(base_symbol, NEAR_ITM_RANGE_FALLBACK.get(base_symbol, NEAR_ITM_DIFF_THRESHOLD))
+                    if zone == "ITM" and diff >= DEEP_ITM_DIFF_THRESHOLD: zone_label = f" ({zone}-{diff}-diff)"
+                    elif zone == "ITM" and diff < DEEP_ITM_DIFF_THRESHOLD and num_lots >= NEAR_ITM_MIN_LOTS: zone_label = f" (ITM-{diff}-diff-HIGHLOTS)"
+                    elif diff <= near_itm_diff_threshold and num_lots >= NEAR_ITM_MIN_LOTS: zone_label = f" (NEAR-ITM-{diff}-diff)"
+                    else: continue
+                else: continue
 
-            # --- TURNOVER CALCULATION ---
-            if "WRITER" in action or "SHORT COVERING" in action:
-                turnover = num_lots * 120000
-                current_threshold = WRITER_SC_THRESHOLD
-            else:
-                turnover = oi_val * price
-                current_threshold = BUYER_UW_THRESHOLD
-
-            if turnover < current_threshold:
-                continue
-
+            turnover = (num_lots * 120000) if ("WRITER" in action or "SHORT COVERING" in action) else (oi_val * price)
+            current_threshold = WRITER_SC_THRESHOLD if ("WRITER" in action or "SHORT COVERING" in action) else BUYER_UW_THRESHOLD
+            if turnover < current_threshold: continue
             turnover_cr = turnover / 10000000
-            
-            passed.append(
-                f"🏷 **{symbol}{zone_label}**\n"
-                f"⚡ **{action}**\n"
-                f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
-                f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
-                f"📊 Price: {price}\n"
-                f"🔹 **Fut Price: {future_price}**"
-            )
+            passed.append(f"🏷 **{symbol}{zone_label}**\n⚡ **{action}**\n💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
         except Exception as e:
             logger.error(f"Error processing alert: {e}")
             continue
-            
     return "\n\n---\n\n".join(passed)
 
 # =========================
 # TELEGRAM HANDLERS
 # =========================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Only buffer messages during market hours
-    if not is_market_hours():
-        return
-
+    if not is_market_hours(): return
     m = update.channel_post or update.message
     if m and str(m.chat_id) == str(SOURCE_CHAT_ID) and m.text:
-        async with BUFFER_LOCK:
-            MESSAGE_BUFFER.append(m.text)
+        async with BUFFER_LOCK: MESSAGE_BUFFER.append(m.text)
 
 async def aggregation_task(app):
     while True:
         await asyncio.sleep(AGGREGATION_INTERVAL)
-        
-        # Only process buffer during market hours
         if not is_market_hours():
-            async with BUFFER_LOCK:
-                MESSAGE_BUFFER.clear() # Keep buffer empty outside hours
+            async with BUFFER_LOCK: MESSAGE_BUFFER.clear()
             continue
-
         async with BUFFER_LOCK:
             if not MESSAGE_BUFFER: continue
             batch = list(MESSAGE_BUFFER); MESSAGE_BUFFER.clear()
-        
         summary = summarize_alerts(batch)
         if summary:
-            try:
-                await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
+            try: await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
             except: pass
 
 async def post_init(app):
@@ -304,9 +312,7 @@ if __name__ == "__main__":
         try:
             app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
             app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
-            logger.info("Bot starting with NSE turnover filters and MCX ITM/lot filters...")
+            logger.info("Bot starting with dynamic instrument data (June 2026)...")
             app.run_polling()
-        except Conflict:
-            time.sleep(15)
-        except Exception as e:
-            time.sleep(5)
+        except Conflict: time.sleep(15)
+        except Exception as e: time.sleep(5)
