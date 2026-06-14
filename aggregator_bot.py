@@ -82,26 +82,39 @@ def load_instrument_data():
         logger.info(f"Processing instrument data from {csv_path}...")
         df = pd.read_csv(csv_path, low_memory=False)
         
+        # Segment filter: Focus on F&O
+        fo_df = df[df["segment"].str.contains("-FUT|-OPT", na=False)].copy()
+        
         # Build Lot Sizes
-        for name, group in df.groupby("name"):
+        for name, group in fo_df.groupby("name"):
             if pd.isna(name): continue
             lots = group["lot_size"].mode()
             if not lots.empty:
                 DYNAMIC_LOT_SIZES[name] = int(lots[0])
         
         # Calculate Near ITM Range from Options (Focusing on June 2026)
-        opt_df = df[df["segment"].str.contains("-OPT", na=False)].copy()
+        opt_df = fo_df[fo_df["segment"].str.contains("-OPT", na=False)].copy()
         current_month_str = "2026-06"
         current_opt_df = opt_df[opt_df["expiry"].str.startswith(current_month_str, na=False)].copy()
+        
+        # Use June data if available, otherwise all options
         processing_df = current_opt_df if not current_opt_df.empty else opt_df
         
         for name, group in processing_df.groupby("name"):
             strikes = sorted(group[group["strike"] > 0]["strike"].unique())
             if len(strikes) >= 2:
-                interval = strikes[1] - strikes[0]
-                DYNAMIC_NEAR_ITM_RANGE[name] = interval
+                # Use the MINIMUM difference between adjacent strikes to get the standard interval
+                # This is more robust than just strikes[1] - strikes[0]
+                diffs = [strikes[i+1] - strikes[i] for i in range(len(strikes)-1)]
+                if diffs:
+                    # Filter out any weirdly small differences (e.g. 0.05) if they exist
+                    valid_diffs = [d for d in diffs if d >= 1]
+                    if valid_diffs:
+                        DYNAMIC_NEAR_ITM_RANGE[name] = min(valid_diffs)
+                    else:
+                        DYNAMIC_NEAR_ITM_RANGE[name] = min(diffs)
             else:
-                DYNAMIC_NEAR_ITM_RANGE[name] = 100
+                DYNAMIC_NEAR_ITM_RANGE[name] = 100 # Fallback
 
         logger.info(f"Successfully loaded {len(DYNAMIC_LOT_SIZES)} symbols. RELIANCE Range: {DYNAMIC_NEAR_ITM_RANGE.get('RELIANCE', 'N/A')}")
     except Exception as e:
@@ -205,7 +218,10 @@ def classify_strike(strike, option_type, future_price, symbol=None):
             if option_type == "PE":
                 return "ITM" if strike > future_price else "OTM"
 
+        # Use dynamic range from CSV if available, else fallback
         near_range = DYNAMIC_NEAR_ITM_RANGE.get(symbol, NEAR_ITM_RANGE_FALLBACK.get(symbol, 100))
+        
+        # ITM Logic: Price should be within one strike interval for Near-ITM
         if abs(strike - future_price) <= near_range:
             return "ITM"
         if option_type == "CE":
