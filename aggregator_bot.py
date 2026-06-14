@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import pandas as pd
+import requests
 from datetime import datetime
 import pytz
 from telegram import Update
@@ -42,52 +43,69 @@ MCX_OPTION_MIN_LOTS = 100
 # =========================
 # DYNAMIC INSTRUMENT DATA
 # =========================
-INSTRUMENTS_CSV_PATH = r"C:\Users\kalpe\zarodha\instruments.csv"
+INSTRUMENTS_LOCAL_PATH = "instruments.csv"
+INSTRUMENTS_WINDOWS_PATH = r"C:\Users\kalpe\zarodha\instruments.csv"
 DYNAMIC_LOT_SIZES = {}
 DYNAMIC_NEAR_ITM_RANGE = {}
 
 def load_instrument_data():
-    """Loads lot sizes and calculates strike intervals from instruments.csv."""
+    """Loads lot sizes and strike intervals. Downloads if not found locally."""
     global DYNAMIC_LOT_SIZES, DYNAMIC_NEAR_ITM_RANGE
-    try:
-        if not os.path.exists(INSTRUMENTS_CSV_PATH):
-            logger.warning(f"Instruments CSV not found at {INSTRUMENTS_CSV_PATH}. Using hardcoded fallbacks.")
-            return
+    csv_path = None
 
-        logger.info(f"Loading instrument data from {INSTRUMENTS_CSV_PATH}...")
-        df = pd.read_csv(INSTRUMENTS_CSV_PATH, low_memory=False)
+    # 1. Check priority paths
+    if os.path.exists(INSTRUMENTS_LOCAL_PATH):
+        csv_path = INSTRUMENTS_LOCAL_PATH
+    elif os.path.exists(INSTRUMENTS_WINDOWS_PATH):
+        csv_path = INSTRUMENTS_WINDOWS_PATH
+    
+    # 2. If not found, download from Zerodha (for Container/Railway environments)
+    if not csv_path:
+        try:
+            logger.info("Instruments CSV not found. Downloading fresh copy from Zerodha...")
+            r = requests.get("https://api.kite.trade/instruments", timeout=60)
+            if r.status_code == 200:
+                with open(INSTRUMENTS_LOCAL_PATH, "wb") as f:
+                    f.write(r.content)
+                csv_path = INSTRUMENTS_LOCAL_PATH
+                logger.info("Download successful.")
+            else:
+                logger.error(f"Failed to download instruments. Status: {r.status_code}")
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+
+    if not csv_path:
+        logger.warning("Could not obtain instruments.csv. Using hardcoded fallbacks.")
+        return
+
+    try:
+        logger.info(f"Processing instrument data from {csv_path}...")
+        df = pd.read_csv(csv_path, low_memory=False)
         
-        # Build Lot Sizes from all instruments
+        # Build Lot Sizes
         for name, group in df.groupby("name"):
             if pd.isna(name): continue
             lots = group["lot_size"].mode()
             if not lots.empty:
                 DYNAMIC_LOT_SIZES[name] = int(lots[0])
         
-        # Calculate Near ITM Range from Options (Focusing on current month data)
-        # Assuming current month is June 2026 based on prompt context
+        # Calculate Near ITM Range from Options (Focusing on June 2026)
         opt_df = df[df["segment"].str.contains("-OPT", na=False)].copy()
-        
-        # Try to find current month expiries to get the most accurate intervals
-        # Format in CSV is YYYY-MM-DD
-        current_month_str = "2026-06" 
+        current_month_str = "2026-06"
         current_opt_df = opt_df[opt_df["expiry"].str.startswith(current_month_str, na=False)].copy()
-        
-        # If no June data, fallback to all options
         processing_df = current_opt_df if not current_opt_df.empty else opt_df
         
         for name, group in processing_df.groupby("name"):
             strikes = sorted(group[group["strike"] > 0]["strike"].unique())
             if len(strikes) >= 2:
-                # Interval is the gap between two strikes (User: "two strike diffrence is our interval")
                 interval = strikes[1] - strikes[0]
                 DYNAMIC_NEAR_ITM_RANGE[name] = interval
             else:
-                DYNAMIC_NEAR_ITM_RANGE[name] = 100 # Default
+                DYNAMIC_NEAR_ITM_RANGE[name] = 100
 
-        logger.info(f"Successfully loaded {len(DYNAMIC_LOT_SIZES)} symbols from CSV. Reliance ITM Range: {DYNAMIC_NEAR_ITM_RANGE.get('RELIANCE', 'N/A')}")
+        logger.info(f"Successfully loaded {len(DYNAMIC_LOT_SIZES)} symbols. RELIANCE Range: {DYNAMIC_NEAR_ITM_RANGE.get('RELIANCE', 'N/A')}")
     except Exception as e:
-        logger.error(f"Error loading instrument data from CSV: {e}")
+        logger.error(f"Error processing CSV: {e}")
 
 # Initial load
 load_instrument_data()
@@ -104,7 +122,7 @@ MCX_TRACK_SYMBOLS = [
 ]
 TRACK_SYMBOLS = NSE_TRACK_SYMBOLS + MCX_TRACK_SYMBOLS
 
-# Hardcoded Fallbacks for NEAR_ITM_RANGE (Used if dynamic fails)
+# Hardcoded Fallbacks
 NEAR_ITM_RANGE_FALLBACK = {
     "BANKNIFTY": 100, "NIFTY": 50, "RELIANCE": 10, "MIDCPNIFTY": 25, "FINNIFTY": 50, "SENSEX": 100
 }
@@ -187,10 +205,7 @@ def classify_strike(strike, option_type, future_price, symbol=None):
             if option_type == "PE":
                 return "ITM" if strike > future_price else "OTM"
 
-        # Use dynamic range from CSV if available, else fallback
         near_range = DYNAMIC_NEAR_ITM_RANGE.get(symbol, NEAR_ITM_RANGE_FALLBACK.get(symbol, 100))
-        
-        # ITM Logic: Price should be within one strike interval for Near-ITM
         if abs(strike - future_price) <= near_range:
             return "ITM"
         if option_type == "CE":
