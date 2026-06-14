@@ -36,14 +36,12 @@ except KeyError as e:
 
 # Updated Thresholds based on your requirements
 FUTURE_THRESHOLD = 60000000       # 6 Crore
-WRITER_SC_THRESHOLD = 10000000    # 1 Crore
-BUYER_UW_THRESHOLD = 10000000     # 1 Crore
-DEEP_ITM_DIFF_THRESHOLD = 500
-NEAR_ITM_DIFF_THRESHOLD = 100
-NEAR_ITM_MIN_LOTS = 1000
+WRITER_SC_THRESHOLD = 30000000    # 3 Crore
+BUYER_UW_THRESHOLD = 30000000     # 3 Crore
+NEAR_ITM_MIN_LOTS = 500
 FUTURE_MIN_LOTS = 500
 MCX_FUTURE_MIN_LOTS = 300
-MCX_OPTION_MIN_LOTS = 100
+MCX_OPTION_MIN_LOTS = 200  # For Crude Oil Near-ITM as requested
 
 # =========================
 # DYNAMIC INSTRUMENT DATA
@@ -264,15 +262,34 @@ def summarize_alerts(alerts):
                 strike_val = float(strike_m.group(1))
                 option_type = strike_m.group(2)
                 zone = classify_strike(strike_val, option_type, future_price, base_symbol)
-                if zone != "ITM" or num_lots < MCX_OPTION_MIN_LOTS: continue
+                
+                # Crude Oil specific Near-ITM rule
+                current_mcx_threshold = MCX_OPTION_MIN_LOTS
+                if "CRUDEOIL" in symbol.upper():
+                    interval = DYNAMIC_NEAR_ITM_RANGE.get(base_symbol, NEAR_ITM_RANGE_FALLBACK.get(base_symbol, 100))
+                    diff = abs(strike_val - future_price)
+                    if diff <= interval: # Near-ITM
+                        current_mcx_threshold = 200
+                
+                if zone != "ITM" or num_lots < current_mcx_threshold: continue
                 diff = round(abs(strike_val - future_price), 2)
                 passed.append(f"🏷 **{symbol} (MCX-ITM-{diff}-diff)**\n⚡ **{action}**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
                 continue
 
+            # --- Turnover Threshold Logic ---
+            if "WRITER" in action or "SHORT COVERING" in action:
+                turnover = num_lots * 120000
+                current_threshold = WRITER_SC_THRESHOLD
+            else:
+                turnover = oi_val * price
+                current_threshold = BUYER_UW_THRESHOLD
+            
+            meets_turnover = turnover >= current_threshold
+            meets_lots = num_lots >= NEAR_ITM_MIN_LOTS
+            
             zone_label = ""
             if "FUT" in symbol.upper():
                 if num_lots < FUTURE_MIN_LOTS: continue
-                turnover = oi_val * price
                 if turnover < FUTURE_THRESHOLD: continue
                 turnover_cr = turnover / 10000000
                 passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
@@ -283,19 +300,37 @@ def summarize_alerts(alerts):
                     strike_val = float(strike_m.group(1))
                     option_type = strike_m.group(2)
                     zone = classify_strike(strike_val, option_type, future_price, base_symbol)
+                    
                     diff = round(abs(strike_val - future_price), 2)
-                    near_itm_diff_threshold = DYNAMIC_NEAR_ITM_RANGE.get(base_symbol, NEAR_ITM_RANGE_FALLBACK.get(base_symbol, NEAR_ITM_DIFF_THRESHOLD))
-                    if zone == "ITM" and diff >= DEEP_ITM_DIFF_THRESHOLD: zone_label = f" ({zone}-{diff}-diff)"
-                    elif zone == "ITM" and diff < DEEP_ITM_DIFF_THRESHOLD and num_lots >= NEAR_ITM_MIN_LOTS: zone_label = f" (ITM-{diff}-diff-HIGHLOTS)"
-                    elif diff <= near_itm_diff_threshold and num_lots >= NEAR_ITM_MIN_LOTS: zone_label = f" (NEAR-ITM-{diff}-diff)"
-                    else: continue
-                else: continue
+                    interval = DYNAMIC_NEAR_ITM_RANGE.get(base_symbol, NEAR_ITM_RANGE_FALLBACK.get(base_symbol, 100))
+                    far_itm_threshold = interval * 5
+                    
+                    # FILTER Logic:
+                    # 1. Far ITM: Only requires turnover check
+                    # 2. Mid/Near ITM: Requires (500+ Lots) OR (3Cr Turnover)
+                    if zone == "ITM" and diff >= far_itm_threshold:
+                        if not meets_turnover: continue
+                        zone_label = f" (FAR-ITM-{diff}-diff)"
+                    elif zone == "ITM" and diff >= interval:
+                        if not (meets_lots or meets_turnover): continue
+                        zone_label = f" (MID-ITM-{diff}-diff)"
+                    elif diff <= interval:
+                        if not (meets_lots or meets_turnover): continue
+                        zone_label = f" (NEAR-ITM-{diff}-diff)"
+                    else:
+                        continue
+                else:
+                    continue
 
-            turnover = (num_lots * 120000) if ("WRITER" in action or "SHORT COVERING" in action) else (oi_val * price)
-            current_threshold = WRITER_SC_THRESHOLD if ("WRITER" in action or "SHORT COVERING" in action) else BUYER_UW_THRESHOLD
-            if turnover < current_threshold: continue
             turnover_cr = turnover / 10000000
-            passed.append(f"🏷 **{symbol}{zone_label}**\n⚡ **{action}**\n💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
+            passed.append(
+                f"🏷 **{symbol}{zone_label}**\n"
+                f"⚡ **{action}**\n"
+                f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
+                f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
+                f"📊 Price: {price}\n"
+                f"🔹 **Fut Price: {future_price}**"
+            )
         except Exception as e:
             logger.error(f"Error processing alert: {e}")
             continue
