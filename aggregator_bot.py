@@ -3,6 +3,8 @@ import asyncio
 import logging
 import re
 import time
+import json
+import uuid
 import pandas as pd
 import requests
 from datetime import datetime
@@ -30,6 +32,12 @@ try:
     SOURCE_CHAT_ID = int(os.environ["SOURCE_CHAT_ID"])
     TARGET_CHAT_ID = int(os.environ["TARGET_CHAT_ID"])
     AGGREGATION_INTERVAL = int(os.getenv("AGGREGATION_INTERVAL", 5))
+
+    # Matrix / Element X Credentials
+    MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "https://matrix.org")
+    MATRIX_ACCESS_TOKEN = os.getenv("MATRIX_ACCESS_TOKEN", "")
+    # Check for custom name 'meta-scanner' or standard MATRIX_ROOM_ID
+    MATRIX_ROOM_ID = os.getenv("meta-scanner") or os.getenv("MATRIX_ROOM_ID", "")
 except KeyError as e:
     logger.critical(f"Missing Env Var: {e}")
     raise SystemExit
@@ -345,6 +353,31 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m and str(m.chat_id) == str(SOURCE_CHAT_ID) and m.text:
         async with BUFFER_LOCK: MESSAGE_BUFFER.append(m.text)
 
+async def send_matrix_message(message):
+    if not (MATRIX_ACCESS_TOKEN and MATRIX_ROOM_ID):
+        return
+    try:
+        txn_id = str(uuid.uuid4())
+        url = f"{MATRIX_HOMESERVER}/_matrix/client/v3/rooms/{MATRIX_ROOM_ID}/send/m.room.message/{txn_id}"
+        headers = {
+            "Authorization": f"Bearer {MATRIX_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "msgtype": "m.text",
+            "body": message
+        }
+        # Run in executor since requests is blocking
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(
+            None, 
+            lambda: requests.put(url, headers=headers, data=json.dumps(payload), timeout=10)
+        )
+        if res.status_code != 200:
+            logger.error(f"Matrix Delivery Error: {res.status_code} - {res.text}")
+    except Exception as e:
+        logger.error(f"Matrix Exception: {e}")
+
 async def aggregation_task(app):
     while True:
         await asyncio.sleep(AGGREGATION_INTERVAL)
@@ -356,8 +389,14 @@ async def aggregation_task(app):
             batch = list(MESSAGE_BUFFER); MESSAGE_BUFFER.clear()
         summary = summarize_alerts(batch)
         if summary:
-            try: await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
-            except: pass
+            # Send to Telegram
+            try: 
+                await app.bot.send_message(TARGET_CHAT_ID, summary, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Telegram Send Error: {e}")
+            
+            # Send to Matrix
+            await send_matrix_message(summary)
 
 async def post_init(app):
     asyncio.create_task(aggregation_task(app))
