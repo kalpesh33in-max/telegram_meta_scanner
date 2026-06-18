@@ -36,6 +36,9 @@ try:
     # Matrix / Element X Credentials
     MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "https://matrix.org")
     MATRIX_ACCESS_TOKEN = os.getenv("MATRIX_ACCESS_TOKEN", "")
+    MATRIX_USER = os.getenv("MATRIX_USER", "")
+    MATRIX_PASS = os.getenv("MATRIX_PASS", "")
+    MATRIX_TOKEN_FILE = "matrix_access_token.txt"
     # Check for custom name 'meta-scanner' or standard MATRIX_ROOM_ID
     MATRIX_ROOM_ID = os.getenv("meta-scanner") or os.getenv("MATRIX_ROOM_ID", "")
 except KeyError as e:
@@ -50,6 +53,57 @@ NEAR_ITM_MIN_LOTS = 500
 FUTURE_MIN_LOTS = 500
 MCX_FUTURE_MIN_LOTS = 300
 MCX_OPTION_MIN_LOTS = 200  # For Crude Oil Near-ITM as requested
+
+# =========================
+# MATRIX UTILS
+# =========================
+
+def perform_matrix_login():
+    if not MATRIX_USER or not MATRIX_PASS:
+        return None
+    
+    login_url = f"{MATRIX_HOMESERVER}/_matrix/client/v3/login"
+    payload = {
+        "type": "m.login.password",
+        "user": MATRIX_USER,
+        "password": MATRIX_PASS,
+        "initial_device_display_name": "MetaScannerAuto"
+    }
+    
+    try:
+        response = requests.post(login_url, json=payload, timeout=15)
+        if response.status_code == 200:
+            token = response.json().get("access_token")
+            if token:
+                with open(MATRIX_TOKEN_FILE, "w") as f:
+                    f.write(token)
+                logger.info("Matrix auto-login successful.")
+                return token
+        else:
+            logger.error(f"Matrix auto-login failed: {response.status_code} - {response.text}")
+    except Exception as e:
+        logger.error(f"Matrix auto-login error: {e}")
+    return None
+
+def get_matrix_token():
+    # 1. Try to read from file first
+    token = None
+    if os.path.exists(MATRIX_TOKEN_FILE):
+        try:
+            with open(MATRIX_TOKEN_FILE, "r") as f:
+                token = f.read().strip()
+        except Exception as e:
+            logger.error(f"Error reading {MATRIX_TOKEN_FILE}: {e}")
+    
+    # 2. Fallback to environment variable
+    if not token:
+        token = MATRIX_ACCESS_TOKEN
+        
+    # 3. Auto-login if still no token
+    if not token:
+        token = perform_matrix_login()
+        
+    return token
 
 # =========================
 # DYNAMIC INSTRUMENT DATA
@@ -354,25 +408,34 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with BUFFER_LOCK: MESSAGE_BUFFER.append(m.text)
 
 async def send_matrix_message(message):
-    if not (MATRIX_ACCESS_TOKEN and MATRIX_ROOM_ID):
+    token = get_matrix_token()
+    if not (token and MATRIX_ROOM_ID):
         return
     try:
         txn_id = str(uuid.uuid4())
         url = f"{MATRIX_HOMESERVER}/_matrix/client/v3/rooms/{MATRIX_ROOM_ID}/send/m.room.message/{txn_id}"
         headers = {
-            "Authorization": f"Bearer {MATRIX_ACCESS_TOKEN}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
         payload = {
             "msgtype": "m.text",
             "body": message
         }
-        # Run in executor since requests is blocking
+        
+        def do_request(h):
+            return requests.put(url, headers=h, data=json.dumps(payload), timeout=10)
+
         loop = asyncio.get_event_loop()
-        res = await loop.run_in_executor(
-            None, 
-            lambda: requests.put(url, headers=headers, data=json.dumps(payload), timeout=10)
-        )
+        res = await loop.run_in_executor(None, lambda: do_request(headers))
+        
+        if res.status_code == 401:
+            logger.warning("Matrix token expired. Attempting auto-login...")
+            new_token = perform_matrix_login()
+            if new_token:
+                headers["Authorization"] = f"Bearer {new_token}"
+                res = await loop.run_in_executor(None, lambda: do_request(headers))
+        
         if res.status_code != 200:
             logger.error(f"Matrix Delivery Error: {res.status_code} - {res.text}")
     except Exception as e:
