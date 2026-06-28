@@ -161,7 +161,7 @@ def load_instrument_data(force_download=False):
 
         # Prefer the nearest future expiry so the step logic follows the active contract
         # rollover automatically (for example, June -> July without manual edits).
-        today_ist = pd.Timestamp.now(tz=pytz.timezone("Asia/Kolkata")).normalize()
+        today_ist = pd.Timestamp.now(tz=pytz.timezone("Asia/Kolkata")).tz_localize(None).normalize()
         future_expiries = opt_df[opt_df["expiry_dt"].notna() & (opt_df["expiry_dt"] >= today_ist)]
         active_opt_df = future_expiries if not future_expiries.empty else opt_df[opt_df["expiry_dt"].notna()]
         active_expiry = None
