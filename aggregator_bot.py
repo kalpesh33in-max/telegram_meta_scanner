@@ -46,11 +46,9 @@ except KeyError as e:
     raise SystemExit
 
 # Updated Thresholds based on your requirements
-FUTURE_THRESHOLD = 60000000       # 6 Crore
-WRITER_SC_THRESHOLD = 30000000    # 3 Crore
-BUYER_UW_THRESHOLD = 30000000     # 3 Crore
-NEAR_ITM_MIN_LOTS = 500
 FUTURE_MIN_LOTS = 500
+NEAR_MID_ITM_MIN_LOTS = 500
+FAR_ITM_MIN_LOTS = 100
 MCX_FUTURE_MIN_LOTS = 300
 MCX_OPTION_MIN_LOTS = 200  # For Crude Oil Near-ITM as requested
 
@@ -110,20 +108,21 @@ def get_matrix_token():
 # =========================
 INSTRUMENTS_LOCAL_PATH = "instruments.csv"
 INSTRUMENTS_WINDOWS_PATH = r"C:\Users\kalpe\zarodha\instruments.csv"
+INSTRUMENTS_REFRESH_INTERVAL = int(os.getenv("INSTRUMENTS_REFRESH_INTERVAL", 86400))
 DYNAMIC_LOT_SIZES = {}
 DYNAMIC_NEAR_ITM_RANGE = {}
 
-def load_instrument_data():
-    """Loads lot sizes and strike intervals. Downloads if not found locally."""
+def load_instrument_data(force_download=False):
+    """Loads lot sizes and strike intervals. Downloads fresh copy when requested."""
     global DYNAMIC_LOT_SIZES, DYNAMIC_NEAR_ITM_RANGE
     csv_path = None
 
-    if os.path.exists(INSTRUMENTS_LOCAL_PATH):
+    if not force_download and os.path.exists(INSTRUMENTS_LOCAL_PATH):
         csv_path = INSTRUMENTS_LOCAL_PATH
-    elif os.path.exists(INSTRUMENTS_WINDOWS_PATH):
+    elif not force_download and os.path.exists(INSTRUMENTS_WINDOWS_PATH):
         csv_path = INSTRUMENTS_WINDOWS_PATH
     
-    if not csv_path:
+    if force_download or not csv_path:
         try:
             logger.info("Instruments CSV not found. Downloading fresh copy from Zerodha...")
             r = requests.get("https://api.kite.trade/instruments", timeout=60)
@@ -136,6 +135,11 @@ def load_instrument_data():
                 logger.error(f"Failed to download instruments. Status: {r.status_code}")
         except Exception as e:
             logger.error(f"Download error: {e}")
+
+    if not csv_path and os.path.exists(INSTRUMENTS_LOCAL_PATH):
+        csv_path = INSTRUMENTS_LOCAL_PATH
+    elif not csv_path and os.path.exists(INSTRUMENTS_WINDOWS_PATH):
+        csv_path = INSTRUMENTS_WINDOWS_PATH
 
     if not csv_path:
         logger.warning("Could not obtain instruments.csv. Using hardcoded fallbacks.")
@@ -153,11 +157,20 @@ def load_instrument_data():
                 DYNAMIC_LOT_SIZES[name] = int(lots[0])
         
         opt_df = fo_df[fo_df["segment"].str.contains("-OPT", na=False)].copy()
-        current_month_str = "2026-06"
-        current_opt_df = opt_df[opt_df["expiry"].str.startswith(current_month_str, na=False)].copy()
-        processing_df = current_opt_df if not current_opt_df.empty else opt_df
-        
-        for name, group in processing_df.groupby("name"):
+        opt_df["expiry_dt"] = pd.to_datetime(opt_df["expiry"], errors="coerce")
+
+        # Prefer the nearest future expiry so the step logic follows the active contract
+        # rollover automatically (for example, June -> July without manual edits).
+        today_ist = pd.Timestamp.now(tz=pytz.timezone("Asia/Kolkata")).normalize()
+        future_expiries = opt_df[opt_df["expiry_dt"].notna() & (opt_df["expiry_dt"] >= today_ist)]
+        active_opt_df = future_expiries if not future_expiries.empty else opt_df[opt_df["expiry_dt"].notna()]
+        active_expiry = None
+        if not active_opt_df.empty:
+            active_expiry = active_opt_df["expiry_dt"].min()
+
+        # Build strike interval map from the active option universe so stocks and indices
+        # both get a dynamic step size from instruments.csv.
+        for name, group in active_opt_df.groupby("name"):
             strikes = sorted(group[group["strike"] > 0]["strike"].unique())
             if len(strikes) >= 2:
                 diffs = [strikes[i+1] - strikes[i] for i in range(len(strikes)-1)]
@@ -166,12 +179,25 @@ def load_instrument_data():
                     DYNAMIC_NEAR_ITM_RANGE[name] = min(valid_diffs)
                 else:
                     DYNAMIC_NEAR_ITM_RANGE[name] = min(diffs)
-            else:
-                DYNAMIC_NEAR_ITM_RANGE[name] = 100
 
-        logger.info(f"Successfully loaded {len(DYNAMIC_LOT_SIZES)} symbols. RELIANCE Range: {DYNAMIC_NEAR_ITM_RANGE.get('RELIANCE', 'N/A')}")
+        logger.info(
+            f"Successfully loaded {len(DYNAMIC_LOT_SIZES)} symbols. "
+            f"RELIANCE Range: {DYNAMIC_NEAR_ITM_RANGE.get('RELIANCE', 'N/A')}"
+        )
+        if pd.notna(active_expiry) if active_expiry is not None else False:
+            logger.info(f"Active expiry selected: {active_expiry.date().isoformat()}")
     except Exception as e:
         logger.error(f"Error processing CSV: {e}")
+
+async def refresh_instrument_data_task():
+    """Periodically refreshes instrument metadata from disk or Zerodha."""
+    while True:
+        await asyncio.sleep(INSTRUMENTS_REFRESH_INTERVAL)
+        try:
+            load_instrument_data(force_download=True)
+            logger.info("Instrument data refreshed successfully.")
+        except Exception as e:
+            logger.error(f"Instrument refresh failed: {e}")
 
 # Initial load
 load_instrument_data()
@@ -188,13 +214,9 @@ MCX_TRACK_SYMBOLS = [
 ]
 TRACK_SYMBOLS = NSE_TRACK_SYMBOLS + MCX_TRACK_SYMBOLS
 
-# Hardcoded Fallbacks
-NEAR_ITM_RANGE_FALLBACK = {
-    "BANKNIFTY": 100, "NIFTY": 50, "RELIANCE": 10, "MIDCPNIFTY": 25, "FINNIFTY": 50, "SENSEX": 100
-}
-
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
+MARKET_SESSION_REFRESHED = False
 
 # =========================
 # UTILITIES & LOGIC
@@ -260,6 +282,14 @@ def is_mcx_symbol(symbol):
     s = symbol.upper().replace(" ", "")
     return any(name in s for name in MCX_TRACK_SYMBOLS)
 
+def get_step_interval(symbol):
+    """Returns the strike step interval from instruments.csv, with a small generic fallback."""
+    s = symbol.upper().replace(" ", "")
+    base_symbol = next((name for name in TRACK_SYMBOLS if name in s), None)
+    if base_symbol and base_symbol in DYNAMIC_NEAR_ITM_RANGE:
+        return DYNAMIC_NEAR_ITM_RANGE[base_symbol]
+    return 100
+
 def classify_strike(strike, option_type, future_price, symbol=None):
     try:
         strike = float(strike)
@@ -270,7 +300,7 @@ def classify_strike(strike, option_type, future_price, symbol=None):
             if option_type == "PE":
                 return "ITM" if strike > future_price else "OTM"
 
-        near_range = DYNAMIC_NEAR_ITM_RANGE.get(symbol, NEAR_ITM_RANGE_FALLBACK.get(symbol, 100))
+        near_range = get_step_interval(symbol)
         if abs(strike - future_price) <= near_range:
             return "ITM"
         if option_type == "CE":
@@ -291,6 +321,7 @@ def identify_participant(text):
 def summarize_alerts(alerts):
     passed = []
     p_sym = re.compile(r"Symbol\s*:\s*(.*?)(?:\n|$)", re.IGNORECASE)
+    p_lots = re.compile(r"LOTS\s*:\s*([0-9,]+)", re.IGNORECASE)
     p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
     p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
     p_fut = re.compile(r"FUTURE PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
@@ -301,23 +332,28 @@ def summarize_alerts(alerts):
             if not any(name in upper_alert for name in TRACK_SYMBOLS):
                 continue
 
-            s_m, oi_m, pr_m, f_m = p_sym.search(alert), p_oi.search(alert), p_pr.search(alert), p_fut.search(alert)
-            if not (s_m and oi_m and pr_m and f_m): continue
+            s_m = p_sym.search(alert)
+            lots_m = p_lots.search(alert)
+            oi_m = p_oi.search(alert)
+            pr_m = p_pr.search(alert)
+            f_m = p_fut.search(alert)
+            if not (s_m and lots_m and oi_m and pr_m and f_m): continue
 
             symbol = s_m.group(1).strip()
             price = float(pr_m.group(1))
             future_price = float(f_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
+            raw_lots = float(lots_m.group(1).replace(",", ""))
             
             lot_size = get_lot_size(symbol)
-            num_lots = oi_val / lot_size
+            num_lots = raw_lots if raw_lots > 0 else (oi_val / lot_size)
             action = identify_participant(alert)
             base_symbol = next((name for name in TRACK_SYMBOLS if name in symbol.upper()), None)
 
             if is_mcx_symbol(symbol):
                 if "FUT" in symbol.upper():
                     if num_lots < MCX_FUTURE_MIN_LOTS: continue
-                    passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
+                    passed.append(f"🏷 {symbol}\n⚡ {action}\n💰 Turnover: ₹{(num_lots * 120000) / 10000000:.2f} Cr\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 Fut Price: {future_price}")
                     continue
                 strike_m = re.search(r"(\d+)(CE|PE)$", symbol.upper())
                 if not strike_m: continue
@@ -328,33 +364,23 @@ def summarize_alerts(alerts):
                 # Crude Oil specific Near-ITM rule
                 current_mcx_threshold = MCX_OPTION_MIN_LOTS
                 if "CRUDEOIL" in symbol.upper():
-                    interval = DYNAMIC_NEAR_ITM_RANGE.get(base_symbol, NEAR_ITM_RANGE_FALLBACK.get(base_symbol, 100))
+                    interval = get_step_interval(base_symbol or symbol)
                     diff = abs(strike_val - future_price)
                     if diff <= interval: # Near-ITM
                         current_mcx_threshold = 200
                 
                 if zone != "ITM" or num_lots < current_mcx_threshold: continue
                 diff = round(abs(strike_val - future_price), 2)
-                passed.append(f"🏷 **{symbol} (MCX-ITM-{diff}-diff)**\n⚡ **{action}**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
+                passed.append(f"🏷 {symbol} (MCX-ITM-{diff}-diff)\n⚡ {action}\n💰 Turnover: ₹{(oi_val * price) / 10000000:.2f} Cr\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 Fut Price: {future_price}")
                 continue
 
-            # --- Turnover Threshold Logic ---
-            if "WRITER" in action or "SHORT COVERING" in action:
-                turnover = num_lots * 120000
-                current_threshold = WRITER_SC_THRESHOLD
-            else:
-                turnover = oi_val * price
-                current_threshold = BUYER_UW_THRESHOLD
-            
-            meets_turnover = turnover >= current_threshold
-            meets_lots = num_lots >= NEAR_ITM_MIN_LOTS
+            turnover = oi_val * price
             
             zone_label = ""
             if "FUT" in symbol.upper():
-                if num_lots < FUTURE_MIN_LOTS: continue
-                if turnover < FUTURE_THRESHOLD: continue
+                if num_lots <= FUTURE_MIN_LOTS: continue
                 turnover_cr = turnover / 10000000
-                passed.append(f"🏷 **{symbol}**\n⚡ **{action}**\n💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 **Fut Price: {future_price}**")
+                passed.append(f"🏷 {symbol}\n⚡ {action}\n💰 Turnover: ₹{turnover_cr:.2f} Cr\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 Fut Price: {future_price}")
                 continue
             else:
                 strike_m = re.search(r"(\d+)(CE|PE)$", symbol.upper())
@@ -364,20 +390,20 @@ def summarize_alerts(alerts):
                     zone = classify_strike(strike_val, option_type, future_price, base_symbol)
                     
                     diff = round(abs(strike_val - future_price), 2)
-                    interval = DYNAMIC_NEAR_ITM_RANGE.get(base_symbol, NEAR_ITM_RANGE_FALLBACK.get(base_symbol, 100))
+                    interval = get_step_interval(base_symbol or symbol)
                     far_itm_threshold = interval * 5
                     
                     # FILTER Logic:
-                    # 1. Far ITM: Only requires turnover check
-                    # 2. Mid/Near ITM: Requires (500+ Lots) OR (3Cr Turnover)
+                    # 1. Far ITM: lots must be at least 100
+                    # 2. Near/Mid ITM: lots must be greater than 500
                     if zone == "ITM" and diff >= far_itm_threshold:
-                        if not meets_turnover: continue
+                        if num_lots < FAR_ITM_MIN_LOTS: continue
                         zone_label = f" (FAR-ITM-{diff}-diff)"
                     elif zone == "ITM" and diff >= interval:
-                        if not (meets_lots or meets_turnover): continue
+                        if num_lots <= NEAR_MID_ITM_MIN_LOTS: continue
                         zone_label = f" (MID-ITM-{diff}-diff)"
                     elif diff <= interval:
-                        if not (meets_lots or meets_turnover): continue
+                        if num_lots <= NEAR_MID_ITM_MIN_LOTS: continue
                         zone_label = f" (NEAR-ITM-{diff}-diff)"
                     else:
                         continue
@@ -386,12 +412,12 @@ def summarize_alerts(alerts):
 
             turnover_cr = turnover / 10000000
             passed.append(
-                f"🏷 **{symbol}{zone_label}**\n"
-                f"⚡ **{action}**\n"
-                f"💰 **Turnover: ₹{turnover_cr:.2f} Cr**\n"
+                f"🏷 {symbol}{zone_label}\n"
+                f"⚡ {action}\n"
+                f"💰 Turnover: ₹{turnover_cr:.2f} Cr\n"
                 f"📦 Lots: {int(num_lots)} (Qty: {oi_val})\n"
                 f"📊 Price: {price}\n"
-                f"🔹 **Fut Price: {future_price}**"
+                f"🔹 Fut Price: {future_price}"
             )
         except Exception as e:
             logger.error(f"Error processing alert: {e}")
@@ -442,11 +468,22 @@ async def send_matrix_message(message):
         logger.error(f"Matrix Exception: {e}")
 
 async def aggregation_task(app):
+    global MARKET_SESSION_REFRESHED
     while True:
         await asyncio.sleep(AGGREGATION_INTERVAL)
         if not is_market_hours():
+            MARKET_SESSION_REFRESHED = False
             async with BUFFER_LOCK: MESSAGE_BUFFER.clear()
             continue
+
+        if not MARKET_SESSION_REFRESHED:
+            try:
+                load_instrument_data(force_download=True)
+                MARKET_SESSION_REFRESHED = True
+                logger.info("Market-open instrument refresh completed.")
+            except Exception as e:
+                logger.error(f"Market-open refresh failed: {e}")
+
         async with BUFFER_LOCK:
             if not MESSAGE_BUFFER: continue
             batch = list(MESSAGE_BUFFER); MESSAGE_BUFFER.clear()
@@ -462,7 +499,13 @@ async def aggregation_task(app):
             await send_matrix_message(summary)
 
 async def post_init(app):
+    try:
+        load_instrument_data(force_download=True)
+        logger.info("Startup instrument refresh completed.")
+    except Exception as e:
+        logger.error(f"Startup refresh failed: {e}")
     asyncio.create_task(aggregation_task(app))
+    asyncio.create_task(refresh_instrument_data_task())
 
 if __name__ == "__main__":
     while True:
