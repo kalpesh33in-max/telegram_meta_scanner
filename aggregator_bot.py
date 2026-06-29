@@ -47,7 +47,7 @@ except KeyError as e:
 
 # Updated Thresholds based on your requirements
 FUTURE_MIN_LOTS = 500
-NEAR_MID_ITM_MIN_LOTS = 500
+NEAR_MID_ITM_MIN_LOTS = 300
 FAR_ITM_MIN_LOTS = 100
 MCX_FUTURE_MIN_LOTS = 300
 MCX_OPTION_MIN_LOTS = 200  # For Crude Oil Near-ITM as requested
@@ -395,7 +395,7 @@ def summarize_alerts(alerts):
                     
                     # FILTER Logic:
                     # 1. Far ITM: lots must be at least 100
-                    # 2. Near/Mid ITM: lots must be greater than 500
+                    # 2. Near/Mid ITM: lots must be greater than 300
                     if zone == "ITM" and diff >= far_itm_threshold:
                         if num_lots < FAR_ITM_MIN_LOTS: continue
                         zone_label = f" (FAR-ITM-{diff}-diff)"
