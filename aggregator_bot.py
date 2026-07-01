@@ -203,16 +203,32 @@ async def refresh_instrument_data_task():
 load_instrument_data()
 
 NSE_TRACK_SYMBOLS = [
-    "BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
-    "BAJFINANCE", "BAJAJFINSV", "INDUSINDBK", "BANKBARODA", "PNB", "RELIANCE",
-    "ONGC", "NTPC", "POWERGRID", "COALINDIA", "BPCL", "GAIL", "INFOSYS", "TCS",
-    "HCLTECH", "WIPRO", "TECHM", "TATAMOTORS", "M&M", "MARUTI", "ASHOKLEY",
-    "LT", "SUNPHARMA", "ITC", "HINDUNILVR", "NIFTY", "SENSEX", "MIDCPNIFTY", "FINNIFTY",
+    "BANKNIFTY", "NIFTY", "SENSEX", "MIDCPNIFTY", "FINNIFTY",
+    "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK",
+    "KOTAKBANK", "BANKBARODA", "PNB", "INDUSINDBK", "AUBANK",
+    "INFY", "TCS", "WIPRO", "HCLTECH", "TECHM",
+    "PERSISTENT", "OFSS", "TATASTEEL", "JSWSTEEL", "JINDALSTEL",
+    "HINDALCO", "VEDL", "NATIONALUM", "SAIL", "COALINDIA",
+    "NMDC", "HINDZINC", "M&M", "MARUTI", "BAJAJ-AUTO",
+    "HEROMOTOCO", "TVSMOTOR", "ASHOKLEY", "EICHERMOT", "BHARATFORG",
+    "LT", "SIEMENS", "ABB", "CUMMINSIND", "CGPOWER",
+    "BHEL", "HAL", "BEL", "CIPLA", "SUNPHARMA",
+    "DRREDDY", "LUPIN", "AUROPHARMA", "ZYDUSLIFE", "TORNTPHARM",
+    "DIVISLAB", "MANKIND", "ITC", "HINDUNILVR", "NESTLEIND",
+    "BRITANNIA", "TATACONSUM", "GODREJCP", "DABUR", "COLPAL",
+    "ASIANPAINT", "GRASIM", "ULTRACEMCO", "SHREECEM", "AMBUJACEM",
+    "ADANIENT", "ADANIPORTS", "ADANIPOWER", "ADANIGREEN", "ADANIENSOL",
+    "NTPC", "POWERGRID", "TATAPOWER", "RECLTD", "PFC",
+    "IOC", "BPCL", "HINDPETRO", "GAIL", "ONGC",
+    "BHARTIARTL", "INDUSTOWER", "IDEA", "ETERNAL", "SWIGGY",
+    "TRENT", "DLF", "GODREJPROP", "PRESTIGE", "LODHA",
+    "INDHOTEL", "DELHIVERY", "BAJFINANCE", "BAJAJFINSV",
 ]
 MCX_TRACK_SYMBOLS = [
     "CRUDEOIL",
 ]
 TRACK_SYMBOLS = NSE_TRACK_SYMBOLS + MCX_TRACK_SYMBOLS
+TRACK_SYMBOLS_BY_LENGTH = sorted(TRACK_SYMBOLS, key=len, reverse=True)
 
 MESSAGE_BUFFER = []
 BUFFER_LOCK = asyncio.Lock()
@@ -235,7 +251,7 @@ def is_market_hours():
 def get_lot_size(symbol):
     """Returns accurate lot sizes, prioritizing dynamic data from CSV."""
     s = symbol.upper().replace(" ", "")
-    for name in TRACK_SYMBOLS:
+    for name in TRACK_SYMBOLS_BY_LENGTH:
         if name in s:
             if name in DYNAMIC_LOT_SIZES:
                 return DYNAMIC_LOT_SIZES[name]
@@ -285,7 +301,7 @@ def is_mcx_symbol(symbol):
 def get_step_interval(symbol):
     """Returns the strike step interval from instruments.csv, with a small generic fallback."""
     s = symbol.upper().replace(" ", "")
-    base_symbol = next((name for name in TRACK_SYMBOLS if name in s), None)
+    base_symbol = next((name for name in TRACK_SYMBOLS_BY_LENGTH if name in s), None)
     if base_symbol and base_symbol in DYNAMIC_NEAR_ITM_RANGE:
         return DYNAMIC_NEAR_ITM_RANGE[base_symbol]
     return 100
@@ -329,7 +345,7 @@ def summarize_alerts(alerts):
     for alert in alerts:
         try:
             upper_alert = alert.upper()
-            if not any(name in upper_alert for name in TRACK_SYMBOLS):
+            if not any(name in upper_alert for name in TRACK_SYMBOLS_BY_LENGTH):
                 continue
 
             s_m = p_sym.search(alert)
@@ -348,7 +364,7 @@ def summarize_alerts(alerts):
             lot_size = get_lot_size(symbol)
             num_lots = raw_lots if raw_lots > 0 else (oi_val / lot_size)
             action = identify_participant(alert)
-            base_symbol = next((name for name in TRACK_SYMBOLS if name in symbol.upper()), None)
+            base_symbol = next((name for name in TRACK_SYMBOLS_BY_LENGTH if name in symbol.upper()), None)
 
             if is_mcx_symbol(symbol):
                 if "FUT" in symbol.upper():
