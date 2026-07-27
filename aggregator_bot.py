@@ -1,4 +1,4 @@
-kimport os
+import os
 import asyncio
 import logging
 import re
@@ -437,6 +437,9 @@ def summarize_alerts(alerts):
             if not (s_m and lots_m and oi_m and pr_m and f_m): continue
 
             symbol = s_m.group(1).strip()
+            # Ignore July trades starting from tomorrow
+            if "JUL" in symbol.upper():
+                continue
             price = float(pr_m.group(1))
             future_price = float(f_m.group(1))
             oi_val = abs(int(oi_m.group(1).replace(",", "")))
