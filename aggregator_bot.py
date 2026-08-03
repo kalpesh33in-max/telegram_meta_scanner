@@ -495,12 +495,13 @@ def summarize_alerts(alerts):
                     
                     # FILTER Logic:
                     # 1. Far ITM: lots must be at least 100
-                    # 2. Near/Mid ITM: lots must be greater than 200
+                    # 2. Mid ITM: lots must be at least 100
+                    # 3. Near ITM: lots must be greater than 200
                     if zone == "ITM" and diff >= far_itm_threshold:
                         if num_lots < FAR_ITM_MIN_LOTS: continue
                         zone_label = f" (FAR-ITM-{diff}-diff)"
                     elif zone == "ITM" and diff >= interval:
-                        if num_lots <= 200: continue
+                        if num_lots < 100: continue
                         zone_label = f" (MID-ITM-{diff}-diff)"
                     elif diff <= interval:
                         if num_lots <= 200: continue
