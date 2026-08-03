@@ -419,7 +419,7 @@ def summarize_alerts(alerts):
     passed = []
     p_sym = re.compile(r"Symbol\s*:\s*(.*?)(?:\n|$)", re.IGNORECASE)
     p_lots = re.compile(r"LOTS\s*:\s*([0-9,]+)", re.IGNORECASE)
-    p_oi = re.compile(r"OI CHANGE\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
+    p_oi = re.compile(r"(?:OI CHANGE|VOLUME DELTA)\s*:\s*([+-]?[0-9,]+)", re.IGNORECASE)
     p_pr = re.compile(r"PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
     p_fut = re.compile(r"FUTURE PRICE\s*:\s*([\d\.]+)", re.IGNORECASE)
 
@@ -450,10 +450,20 @@ def summarize_alerts(alerts):
             action = identify_participant(alert)
             base_symbol = next((name for name in TRACK_SYMBOLS_BY_LENGTH if name in symbol.upper()), None)
 
+            # Determine if it's a buying action
+            is_buying = "BUYER" in action or "SHORT COVERING" in action
+            if is_buying:
+                turnover = oi_val * price
+            else:
+                # Writing/Selling case: Lots * 100,000
+                turnover = num_lots * 100000
+            
+            turnover_cr = turnover / 10000000
+
             if is_mcx_symbol(symbol):
                 if "FUT" in symbol.upper():
                     if num_lots < MCX_FUTURE_MIN_LOTS: continue
-                    passed.append(f"🏷 {symbol}\n⚡ {action}\n💰 Turnover: ₹{(num_lots * 120000) / 10000000:.2f} Cr\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 Fut Price: {future_price}")
+                    passed.append(f"🏷 {symbol}\n⚡ {action}\n💰 Turnover: ₹{turnover_cr:.2f} Cr\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 Fut Price: {future_price}")
                     continue
                 strike_m = re.search(r"(\d+)(CE|PE)$", symbol.upper())
                 if not strike_m: continue
@@ -471,15 +481,12 @@ def summarize_alerts(alerts):
                 
                 if zone != "ITM" or num_lots < current_mcx_threshold: continue
                 diff = round(abs(strike_val - future_price), 2)
-                passed.append(f"🏷 {symbol} (MCX-ITM-{diff}-diff)\n⚡ {action}\n💰 Turnover: ₹{(oi_val * price) / 10000000:.2f} Cr\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 Fut Price: {future_price}")
+                passed.append(f"🏷 {symbol} (MCX-ITM-{diff}-diff)\n⚡ {action}\n💰 Turnover: ₹{turnover_cr:.2f} Cr\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 Fut Price: {future_price}")
                 continue
 
-            turnover = oi_val * price
-            
             zone_label = ""
             if "FUT" in symbol.upper():
                 if num_lots <= FUTURE_MIN_LOTS: continue
-                turnover_cr = turnover / 10000000
                 passed.append(f"🏷 {symbol}\n⚡ {action}\n💰 Turnover: ₹{turnover_cr:.2f} Cr\n📦 Lots: {int(num_lots)} (Qty: {oi_val})\n📊 Price: {price}\n🔹 Fut Price: {future_price}")
                 continue
             else:
@@ -511,7 +518,6 @@ def summarize_alerts(alerts):
                 else:
                     continue
 
-            turnover_cr = turnover / 10000000
             passed.append(
                 f"🏷 {symbol}{zone_label}\n"
                 f"⚡ {action}\n"
